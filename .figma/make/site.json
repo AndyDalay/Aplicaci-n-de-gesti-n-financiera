@@ -1,0 +1,11 @@
+{
+  "title": "Gastos en Pareja (v 2.0)",
+  "description": "Manage household finances effortlessly with a responsive app for couples, tracking expenses, budgets, and shopping lists while ensuring collaborative budgeting.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
