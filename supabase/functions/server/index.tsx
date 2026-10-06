@@ -54,10 +54,23 @@ app.get(`${P}/state/version`, async (c) => {
 
 app.put(`${P}/state`, async (c) => {
   try {
-    const state = await c.req.json();
+    const body = await c.req.json();
     const prev = await readState();
+    const versioned = body && typeof body === "object" && Object.hasOwn(body, "baseVersion") && Object.hasOwn(body, "state");
+    const state = versioned ? body.state : body;
     const next = { state, version: (prev.version ?? 0) + 1, updatedAt: Date.now() };
-    await kv.set(STATE_KEY, next);
+    if (versioned) {
+      if (body.baseVersion !== prev.version) {
+        return c.json({ state: prev.state, version: prev.version, updatedAt: prev.updatedAt }, 409);
+      }
+      const updated = await kv.compareAndSet(STATE_KEY, prev.version, next);
+      if (!updated) {
+        const current = await readState();
+        return c.json({ state: current.state, version: current.version, updatedAt: current.updatedAt }, 409);
+      }
+    } else {
+      await kv.set(STATE_KEY, next);
+    }
     return c.json({ ok: true, version: next.version, updatedAt: next.updatedAt });
   } catch (e) { console.log(`PUT /state failed: ${e}`); return c.json({ error: `${e}` }, 500); }
 });

@@ -29,6 +29,24 @@ export const set = async (key: string, value: any): Promise<void> => {
   }
 };
 
+export const compareAndSet = async (key: string, expectedVersion: number, value: any): Promise<boolean> => {
+  const supabase = client();
+  if (expectedVersion === 0) {
+    const { error } = await supabase.from("kv_store_b709b97b").insert({ key, value });
+    if (!error) return true;
+    if (error.code === "23505") return false;
+    throw new Error(error.message);
+  }
+  const { data, error } = await supabase
+    .from("kv_store_b709b97b")
+    .update({ value })
+    .eq("key", key)
+    .eq("value->>version", String(expectedVersion))
+    .select("key");
+  if (error) throw new Error(error.message);
+  return (data?.length ?? 0) > 0;
+};
+
 // Get retrieves a key-value pair from the database.
 export const get = async (key: string): Promise<any> => {
   const supabase = client()

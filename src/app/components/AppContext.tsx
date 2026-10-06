@@ -130,6 +130,21 @@ const defaultShared = (): SharedState => ({
   notifications: [{ id: id(), title: "🏡 Casita lista", body: "Andy y Rachel ya pueden colaborar.", at: Date.now(), readBy: [] }],
 });
 
+const normalizeShared = (state: Partial<SharedState>): SharedState => ({
+  people: state.people ?? DEFAULT_PEOPLE,
+  defaultCurrency: state.defaultCurrency ?? "CUP",
+  rate: state.rate ?? 520,
+  stock: state.stock ?? defaultStock(),
+  shopping: state.shopping ?? [],
+  movements: state.movements ?? [],
+  fixed: state.fixed ?? defaultFixed(),
+  priceOverrides: state.priceOverrides ?? {},
+  notifications: state.notifications ?? [],
+  recipes: state.recipes ?? DEFAULT_RECIPES,
+  weeks: state.weeks ?? {},
+  kitchen: state.kitchen ?? { breakfast: false },
+});
+
 function fireOSNotification(title: string, body: string) {
   if (typeof window === "undefined") return;
   if (!("Notification" in window)) return;
@@ -146,11 +161,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Shared state
   const [shared, setShared] = useState<SharedState>(defaultShared);
+  const sharedRef = useRef(shared);
   const [syncStatus, setSyncStatus] = useState<"loading" | "online" | "offline">("loading");
   const [lastSync, setLastSync] = useState(0);
   const versionRef = useRef(0);
   const writeTimer = useRef<number | null>(null);
-  const pendingShared = useRef<SharedState | null>(null);
+  const pendingMutations = useRef<Array<(s: SharedState) => SharedState>>([]);
+  const writingRef = useRef(false);
+  const flushRef = useRef<() => Promise<void>>(async () => {});
   const seenNotifIds = useRef<Set<string>>(new Set());
 
   // Request OS notification permission once
@@ -176,20 +194,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (res.state) {
-        const next: SharedState = {
-          people: res.state.people ?? DEFAULT_PEOPLE,
-          defaultCurrency: res.state.defaultCurrency ?? "CUP",
-          rate: res.state.rate ?? 520,
-          stock: res.state.stock ?? defaultStock(),
-          shopping: res.state.shopping ?? [],
-          movements: res.state.movements ?? [],
-          fixed: res.state.fixed ?? defaultFixed(),
-          priceOverrides: res.state.priceOverrides ?? {},
-          notifications: res.state.notifications ?? [],
-          recipes: res.state.recipes ?? DEFAULT_RECIPES,
-          weeks: res.state.weeks ?? {},
-          kitchen: res.state.kitchen ?? { breakfast: false },
-        };
+        const next = normalizeShared(res.state);
+        sharedRef.current = next;
         setShared(next);
         next.notifications.forEach((n) => seenNotifIds.current.add(n.id));
         versionRef.current = res.version ?? 0;
@@ -199,9 +205,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } else {
         // Bootstrap server with defaults
         const seed = defaultShared();
-        const written = await pushState(seed);
+        sharedRef.current = seed;
         setShared(seed);
-        if (written) versionRef.current = written.version;
+        const written = await pushState({ state: seed });
+        if (written.ok) versionRef.current = written.version;
       }
       setLastSync(Date.now());
       setSyncStatus("online");
@@ -219,22 +226,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (v.version > versionRef.current) {
+        if (pendingMutations.current.length || writingRef.current) return;
         const res = await fetchState();
         if (cancelled || !res?.state) return;
-        const next: SharedState = {
-          people: res.state.people ?? DEFAULT_PEOPLE,
-          defaultCurrency: res.state.defaultCurrency ?? "CUP",
-          rate: res.state.rate ?? 520,
-          stock: res.state.stock ?? defaultStock(),
-          shopping: res.state.shopping ?? [],
-          movements: res.state.movements ?? [],
-          fixed: res.state.fixed ?? defaultFixed(),
-          priceOverrides: res.state.priceOverrides ?? {},
-          notifications: res.state.notifications ?? [],
-          recipes: res.state.recipes ?? DEFAULT_RECIPES,
-          weeks: res.state.weeks ?? {},
-          kitchen: res.state.kitchen ?? { breakfast: false },
-        };
+        if (pendingMutations.current.length || writingRef.current) return;
+        const next = normalizeShared(res.state);
         // fire OS notifications for new entries (ones we haven't seen yet)
         next.notifications.forEach((n) => {
           if (!seenNotifIds.current.has(n.id)) {
@@ -243,6 +239,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (Date.now() - n.at < 60_000) fireOSNotification(n.title, n.body);
           }
         });
+        sharedRef.current = next;
         setShared(next);
         versionRef.current = res.version;
       }
@@ -261,26 +258,60 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Mutator: applies a local change immediately and schedules a debounced server push
   const mutate = (fn: (s: SharedState) => SharedState) => {
-    setShared((prev) => {
-      const next = fn(prev);
-      pendingShared.current = next;
+    pendingMutations.current.push(fn);
+    const next = fn(sharedRef.current);
+    sharedRef.current = next;
+    setShared(next);
+    if (!writingRef.current) {
       if (writeTimer.current) clearTimeout(writeTimer.current);
-      writeTimer.current = window.setTimeout(async () => {
-        if (!pendingShared.current) return;
-        const written = await pushState(pendingShared.current);
-        if (written) {
+      writeTimer.current = window.setTimeout(() => { void flushRef.current(); }, 350);
+    }
+  };
+
+  flushRef.current = async () => {
+    if (writingRef.current || !pendingMutations.current.length) return;
+    writingRef.current = true;
+    let attempt = 0;
+    try {
+      while (pendingMutations.current.length && attempt < 3) {
+        const sentCount = pendingMutations.current.length;
+        const snapshot = sharedRef.current;
+        const written = await pushState({ state: snapshot, baseVersion: versionRef.current });
+        if (written.ok) {
           versionRef.current = written.version;
+          pendingMutations.current.splice(0, sentCount);
           setSyncStatus("online");
           setLastSync(Date.now());
-        } else {
-          setSyncStatus("offline");
+          continue;
         }
-      }, 350);
-      return next;
-    });
+        if (written.status !== 409 || !written.state || typeof written.version !== "number") break;
+
+        attempt += 1;
+        console.info(`Sincronización: conflicto 409, reintentando (${attempt}/3) sobre versión ${written.version}.`);
+        versionRef.current = written.version;
+        const rebased = normalizeShared(written.state);
+        const replayed = pendingMutations.current.reduce((state, mutation) => mutation(state), rebased);
+        sharedRef.current = replayed;
+        setShared(replayed);
+        if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 300 * attempt));
+      }
+      if (pendingMutations.current.length) {
+        setSyncStatus("offline");
+        console.warn("Sincronización offline: se agotaron los reintentos; los cambios locales siguen pendientes.");
+      }
+    } finally {
+      writingRef.current = false;
+    }
   };
+
+  useEffect(() => {
+    const retry = () => {
+      if (pendingMutations.current.length && !writingRef.current) void flushRef.current();
+    };
+    window.addEventListener("online", retry);
+    return () => window.removeEventListener("online", retry);
+  }, []);
 
   const setPeople = (p: Person[]) => mutate((s) => ({ ...s, people: p }));
   const setDefaultCurrency = (c: Currency) => mutate((s) => ({ ...s, defaultCurrency: c }));

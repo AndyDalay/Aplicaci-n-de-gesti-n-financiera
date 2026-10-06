@@ -10,14 +10,28 @@ const headers = (extra: Record<string, string> = {}) => ({
   ...extra,
 });
 
+const SYNC_TIMEOUT_MS = 8_000;
+
+async function fetchWithTimeout<T>(url: string, init: RequestInit, readResponse: (response: Response) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return await readResponse(response);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function fetchState(): Promise<{ state: any; version: number } | null> {
   try {
-    const res = await fetch(`${BASE}/state`, { headers: headers() });
-    if (!res.ok) {
-      console.log(`fetchState non-ok response while loading shared state: ${res.status}`);
-      return null;
-    }
-    return await res.json();
+    return await fetchWithTimeout(`${BASE}/state`, { headers: headers() }, async (res) => {
+      if (!res.ok) {
+        console.log(`fetchState non-ok response while loading shared state: ${res.status}`);
+        return null;
+      }
+      return await res.json();
+    });
   } catch (e) {
     console.log(`fetchState network error while loading shared state: ${e}`);
     return null;
@@ -26,31 +40,48 @@ export async function fetchState(): Promise<{ state: any; version: number } | nu
 
 export async function fetchVersion(): Promise<{ version: number; updatedAt: number } | null> {
   try {
-    const res = await fetch(`${BASE}/state/version`, { headers: headers() });
-    if (!res.ok) return null;
-    return await res.json();
+    return await fetchWithTimeout(`${BASE}/state/version`, { headers: headers() }, async (res) => {
+      if (!res.ok) return null;
+      return await res.json();
+    });
   } catch (e) {
     console.log(`fetchVersion network error during polling: ${e}`);
     return null;
   }
 }
 
-export async function pushState(payload: any): Promise<{ ok: boolean; version: number; updatedAt: number } | null> {
+export type PushStateResult =
+  | { ok: true; version: number; updatedAt: number }
+  | { ok: false; status: number; error: string; state?: any; version?: number };
+
+export async function pushState(payload: { state: any; baseVersion?: number }): Promise<PushStateResult> {
   try {
-    const res = await fetch(`${BASE}/state`, {
+    return await fetchWithTimeout(`${BASE}/state`, {
       method: "PUT",
       headers: headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
+    }, async (res) => {
+      if (res.status === 409) {
+        const current = await res.json().catch(() => ({}));
+        console.warn(`pushState conflict 409; server version ${current.version ?? "unknown"}`);
+        return {
+          ok: false as const,
+          status: 409,
+          error: "La versión compartida cambió en otro dispositivo.",
+          state: current.state,
+          version: current.version,
+        };
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        console.log(`pushState non-ok response while saving shared state: ${res.status} ${text}`);
+        return { ok: false as const, status: res.status, error: text || `HTTP ${res.status}` };
+      }
+      return await res.json();
     });
-    if (!res.ok) {
-      const text = await res.text();
-      console.log(`pushState non-ok response while saving shared state: ${res.status} ${text}`);
-      return null;
-    }
-    return await res.json();
   } catch (e) {
     console.log(`pushState network error while saving shared state: ${e}`);
-    return null;
+    return { ok: false, status: 0, error: String(e) };
   }
 }
 
