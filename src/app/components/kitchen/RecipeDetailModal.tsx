@@ -22,8 +22,8 @@ export function RecipeDetailModal({ recipe, onClose, onEdit }: { recipe: Recipe 
       {r && (
         <div className="space-y-4">
           <RecipePhoto
-            key={r.id} name={r.name} ingredients={r.ingredients.map((i) => i.name)} url={r.imageUrl}
-            onUrl={(u) => { if (u !== (r.imageUrl ?? "")) saveRecipe({ ...r, imageUrl: u || undefined }); }}
+            key={r.id} name={r.name} ingredients={r.ingredients.map((i) => i.name)} url={r.imageUrl} meta={r.imageMeta} recipeId={r.id}
+            onPhoto={(u, m) => { if (u !== (r.imageUrl ?? "")) saveRecipe({ ...r, imageUrl: u || undefined, imageMeta: u ? m : undefined }); }}
           />
           <div className="flex flex-wrap gap-1.5">
             {r.minutes ? <Tag className="bg-white">⏱ {r.minutes} min</Tag> : null}

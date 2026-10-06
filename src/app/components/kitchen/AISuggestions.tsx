@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../AppContext";
 import { SketchButton } from "../ui-kit";
-import { matchProduct, MEAL_SLOTS, PRODUCTS, Recipe, resolveWeek } from "../data";
+import { matchProduct, MEAL_SLOTS, PhotoMeta, PRODUCTS, Recipe, resolveWeek } from "../data";
 import { AISuggestion, fetchRecipeSuggestions } from "../sync";
 import { ingredientStatus, SCALE_META, SG_BOLD, Tag } from "./kit";
 import { SuggestionDetailModal } from "./SuggestionDetailModal";
@@ -38,7 +38,7 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
     }
   };
 
-  const adopt = (s: AISuggestion, imageUrl?: string) => {
+  const adopt = (s: AISuggestion, imageUrl?: string, imageMeta?: PhotoMeta) => {
     setOpen(null);
     const rid = saveRecipe({
       name: s.name, emoji: s.emoji || "🍲", minutes: s.minutes, description: s.description,
@@ -46,6 +46,7 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
       ingredients: s.ingredients.map((i) => ({ name: i.name, qty: i.qty, productId: matchProduct(i.name)?.id })),
       steps: s.steps,
       imageUrl: imageUrl || undefined,
+      imageMeta: imageUrl ? imageMeta : undefined,
     });
     onPick(rid);
   };

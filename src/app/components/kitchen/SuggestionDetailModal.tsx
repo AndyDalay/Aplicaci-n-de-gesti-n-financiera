@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Modal } from "../Modal";
 import { useApp } from "../AppContext";
 import { SketchButton } from "../ui-kit";
-import { matchProduct } from "../data";
+import { matchProduct, PhotoMeta } from "../data";
 import { AISuggestion } from "../sync";
 import { ingredientStatus, productEmoji, SCALE_META, SG_BOLD, Tag } from "./kit";
 import { RecipePhoto } from "./RecipePhoto";
@@ -13,9 +13,9 @@ const STATUS = {
   buy: { label: "Hay que comprar", cls: "bg-pastel-coral" },
 } as const;
 
-export function SuggestionDetailModal({ s, onClose, onAdopt }: { s: AISuggestion | null; onClose: () => void; onAdopt: (s: AISuggestion, imageUrl?: string) => void }) {
+export function SuggestionDetailModal({ s, onClose, onAdopt }: { s: AISuggestion | null; onClose: () => void; onAdopt: (s: AISuggestion, imageUrl?: string, imageMeta?: PhotoMeta) => void }) {
   const { stock } = useApp();
-  const [photo, setPhoto] = useState<string | undefined>();
+  const [photo, setPhoto] = useState<{ url: string; meta?: PhotoMeta } | undefined>();
   useEffect(() => setPhoto(undefined), [s]);
   const meta = s ? SCALE_META[s.scale] ?? SCALE_META.rapido : null;
 
@@ -23,7 +23,7 @@ export function SuggestionDetailModal({ s, onClose, onAdopt }: { s: AISuggestion
     <Modal open={!!s} onClose={onClose} title={s ? `${s.emoji} ${s.name}` : ""}>
       {s && meta && (
         <div className="space-y-4">
-          <RecipePhoto name={s.name} ingredients={s.ingredients.map((i) => i.name)} onUrl={setPhoto} />
+          <RecipePhoto key={s.name} name={s.name} ingredients={s.ingredients.map((i) => i.name)} onPhoto={(url, meta) => setPhoto({ url, meta })} />
           <div className="flex flex-wrap gap-1.5">
             <Tag className="bg-white">⏱ {s.minutes} min</Tag>
             <Tag className={meta.bg}>{meta.emoji} {meta.label}</Tag>
@@ -65,7 +65,7 @@ export function SuggestionDetailModal({ s, onClose, onAdopt }: { s: AISuggestion
             )}
           </section>
 
-          <SketchButton color="yellow" block onClick={() => onAdopt(s, photo)}>+ Al calendario</SketchButton>
+          <SketchButton color="yellow" block onClick={() => onAdopt(s, photo?.url, photo?.meta)}>+ Al calendario</SketchButton>
         </div>
       )}
     </Modal>

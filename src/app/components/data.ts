@@ -187,6 +187,8 @@ export const MEAL_SLOTS: { id: MealSlot; label: string; emoji: string }[] = [
 
 export type RecipeIngredient = { productId?: string; name: string; qty: string };
 export type RecipeScale = "rapido" | "saludable" | "elegante";
+/** Where a recipe photo came from; `credit`/`link` are shown for stock photos (attribution). */
+export type PhotoMeta = { source: "stock" | "ai" | "user"; credit?: string; link?: string };
 
 export type Recipe = {
   id: string;
@@ -199,6 +201,7 @@ export type Recipe = {
   steps: string[];
   cookId?: string;
   imageUrl?: string;
+  imageMeta?: PhotoMeta;
   createdAt: number;
 };
 

@@ -1,6 +1,9 @@
 import { projectId, publicAnonKey } from "/utils/supabase/info";
+import type { PhotoMeta } from "./data";
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-b709b97b`;
+/** Separate Edge Function for recipe photos (supabase/functions/recipe-photos). */
+const PHOTOS = `https://${projectId}.supabase.co/functions/v1/recipe-photos`;
 
 const headers = (extra: Record<string, string> = {}) => ({
   Authorization: `Bearer ${publicAnonKey}`,
@@ -107,29 +110,161 @@ export async function fetchRecipeSuggestions(ctx: { couple: string; inventory: s
 }
 
 
-const photoCache = new Map<string, Promise<string>>();
+// ---------- Recipe photos ----------
+export type PhotoEvent = {
+  stage: string;
+  status: "start" | "ok" | "skip" | "error" | "info";
+  message: string;
+  failedStage?: string;
+  detail?: string;
+  result?: { url: string; meta?: PhotoMeta; cached?: boolean };
+};
+export type PhotoResult = { url: string; meta: PhotoMeta; cached?: boolean };
 
-/** Asks the server for a product-style photo of the dish (cached server-side by name). Rejects on any failure. */
-export function fetchRecipePhoto(name: string, ingredients: string[]): Promise<string> {
-  const k = name.trim().toLowerCase();
-  const hit = photoCache.get(k);
-  if (hit) return hit;
-  const p = (async () => {
-    if (typeof navigator !== "undefined" && navigator.onLine === false) throw new Error("offline");
-    const res = await fetch(`${BASE}/ai/photo`, {
+export class PhotoError extends Error {
+  constructor(public stage: string, message: string, public detail?: string) { super(message); }
+}
+
+export const STAGE_LABEL: Record<string, string> = {
+  conexión: "Conexión", servidor: "Servidor", config: "Configuración", storage: "Almacenamiento",
+  cache: "Revisando fotos guardadas", queries: "Preparando búsquedas", search: "Buscando en Magnific",
+  vision: "Verificando con IA", download: "Descargando", save: "Guardando", ai: "Generando con IA",
+  subida: "Subiendo tu foto", imagen: "Mostrando la foto",
+};
+const STAGE_PCT: Record<string, number> = { cache: 8, queries: 20, search: 38, vision: 62, download: 82, save: 93, ai: 50, subida: 60 };
+export const stageProgress = (stage?: string) => STAGE_PCT[stage ?? ""] ?? 5;
+
+const PHOTO_TIMEOUT_MS = 75_000;
+
+async function streamPhoto(
+  args: { name: string; ingredients: string[]; forceRefresh?: boolean; mode?: "stock" | "ai" },
+  emit: (e: PhotoEvent) => void,
+): Promise<PhotoResult> {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) throw new PhotoError("conexión", "Sin conexión a internet.");
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PHOTO_TIMEOUT_MS);
+  let lastStage = "conexión";
+  try {
+    const res = await fetch(`${PHOTOS}/recipe-image`, {
       method: "POST",
       headers: headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name, ingredients }),
-      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify(args),
+      signal: ctrl.signal,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || typeof data.url !== "string") {
-      console.log(`fetchRecipePhoto failed: ${res.status} ${data.error ?? ""}`);
-      throw new Error(data.error ?? `HTTP ${res.status}`);
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      throw new PhotoError(
+        "servidor",
+        res.status === 404 ? "El servidor no tiene el servicio de fotos desplegado (404)." : `El servidor respondió con error ${res.status}.`,
+        text.slice(0, 200),
+      );
     }
-    return data.url as string;
-  })();
-  photoCache.set(k, p);
-  p.catch(() => photoCache.delete(k));
-  return p;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let result: PhotoResult | null = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let ev: PhotoEvent;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.stage && ev.stage !== "error" && ev.stage !== "done") lastStage = ev.stage;
+        emit(ev);
+        if (ev.stage === "error") throw new PhotoError(ev.failedStage ?? lastStage, ev.message, ev.detail);
+        if (ev.stage === "done" && ev.result?.url) result = { url: ev.result.url, meta: ev.result.meta ?? { source: "stock" }, cached: ev.result.cached };
+      }
+    }
+    if (!result) throw new PhotoError(lastStage, "La conexión se cortó antes de terminar.");
+    return result;
+  } catch (e) {
+    if (e instanceof PhotoError) throw e;
+    if ((e as any)?.name === "AbortError") {
+      throw new PhotoError(lastStage, `Se agotó el tiempo de espera (${PHOTO_TIMEOUT_MS / 1000} s) en la etapa «${STAGE_LABEL[lastStage] ?? lastStage}».`);
+    }
+    throw new PhotoError("conexión", "No se pudo conectar con el servidor.", String(e));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// One request per recipe at a time: remounts/StrictMode share the same stream instead of spending credits twice.
+const inflight = new Map<string, { listeners: Set<(e: PhotoEvent) => void>; last?: PhotoEvent; promise: Promise<PhotoResult> }>();
+
+export function requestRecipePhoto(
+  args: { name: string; ingredients: string[]; forceRefresh?: boolean; mode?: "stock" | "ai" },
+  onEvent: (e: PhotoEvent) => void,
+) {
+  const k = `${args.name.trim().toLowerCase()}|${args.mode ?? "stock"}|${args.forceRefresh ? "f" : ""}`;
+  let entry = inflight.get(k);
+  if (!entry) {
+    const listeners = new Set<(e: PhotoEvent) => void>();
+    const e: { listeners: typeof listeners; last?: PhotoEvent; promise: Promise<PhotoResult> } = {
+      listeners,
+      promise: streamPhoto(args, (ev) => { e.last = ev; listeners.forEach((l) => l(ev)); }).finally(() => inflight.delete(k)),
+    };
+    e.promise.catch(() => {}); // errors are delivered to subscribers through `promise`
+    inflight.set(k, e);
+    entry = e;
+  }
+  entry.listeners.add(onEvent);
+  if (entry.last) onEvent(entry.last);
+  const own = entry;
+  return { promise: own.promise, unsubscribe: () => own.listeners.delete(onEvent) };
+}
+
+/** Resizes to max 1000 px and re-encodes as WebP/JPEG so uploads are small and always a supported format (also converts HEIC where the browser can decode it). */
+async function prepareImage(file: File, maxSide = 1000): Promise<Blob> {
+  let bmp: ImageBitmap | HTMLImageElement;
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    bmp = await new Promise<HTMLImageElement>((ok, bad) => {
+      const img = new Image();
+      const u = URL.createObjectURL(file);
+      img.onload = () => { URL.revokeObjectURL(u); ok(img); };
+      img.onerror = () => { URL.revokeObjectURL(u); bad(new Error("Este formato de imagen no se puede leer. Prueba con JPG o PNG.")); };
+      img.src = u;
+    });
+  }
+  const w = "naturalWidth" in bmp ? bmp.naturalWidth : bmp.width;
+  const h = "naturalHeight" in bmp ? bmp.naturalHeight : bmp.height;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  canvas.getContext("2d")!.drawImage(bmp as CanvasImageSource, 0, 0, canvas.width, canvas.height);
+  const toBlob = (type: string, q: number) => new Promise<Blob | null>((ok) => canvas.toBlob(ok, type, q));
+  const blob = (await toBlob("image/webp", 0.82)) ?? (await toBlob("image/jpeg", 0.85));
+  if (!blob) throw new Error("No se pudo preparar la imagen.");
+  return blob;
+}
+
+export async function uploadRecipePhoto(file: File, recipeId: string | undefined, onStep: (msg: string) => void): Promise<PhotoResult> {
+  let blob: Blob;
+  try {
+    onStep("Optimizando tu foto…");
+    blob = await prepareImage(file);
+  } catch (e) {
+    throw new PhotoError("subida", e instanceof Error ? e.message : "No se pudo leer la imagen.");
+  }
+  onStep(`Subiendo tu foto (${Math.round(blob.size / 1024)} KB)…`);
+  const form = new FormData();
+  form.append("file", new File([blob], blob.type === "image/webp" ? "foto.webp" : "foto.jpg", { type: blob.type }));
+  if (recipeId) form.append("recipeId", recipeId);
+  try {
+    const res = await fetch(`${PHOTOS}/recipe-image/upload`, { method: "POST", headers: headers(), body: form, signal: AbortSignal.timeout(40_000) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || typeof data.url !== "string") throw new PhotoError("subida", data.error ?? `El servidor respondió con error ${res.status}.`);
+    return { url: data.url, meta: { source: "user" } };
+  } catch (e) {
+    if (e instanceof PhotoError) throw e;
+    if ((e as any)?.name === "TimeoutError") throw new PhotoError("subida", "La subida tardó demasiado. Revisa tu conexión.");
+    throw new PhotoError("conexión", "No se pudo conectar con el servidor.", String(e));
+  }
 }
