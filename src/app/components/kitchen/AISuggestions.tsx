@@ -1,11 +1,17 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { X } from "lucide-react";
 import { useApp } from "../AppContext";
 import { SketchButton } from "../ui-kit";
-import { matchProduct, MEAL_SLOTS, PhotoMeta, PRODUCTS, Recipe, resolveWeek } from "../data";
+import { matchProduct, PhotoMeta, PRODUCTS, resolveWeek } from "../data";
 import { AISuggestion, fetchRecipeSuggestions } from "../sync";
 import { ingredientStatus, SCALE_META, SG_BOLD, Tag } from "./kit";
 import { SuggestionDetailModal } from "./SuggestionDetailModal";
+import { IngredientPicker } from "./IngredientPicker";
+
+const CRAVING_DRAFT_KEY = "casita:chef-craving-draft";
+const QUICK_CRAVINGS = ["Con picadillo", "Pasta", "Algo ligero", "Con huevo", "Sin freír", "Para compartir"];
+type ActiveOrder = { craving: string; ingredientIds: string[]; onlyInventory: boolean };
 
 /** Chef-IA cards: three suggestions (rápido · saludable · elegante) built from the household context. */
 export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeId: string) => void }) {
@@ -14,9 +20,22 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [err, setErr] = useState("");
   const [open, setOpen] = useState<AISuggestion | null>(null);
+  const [craving, setCraving] = useState(() => localStorage.getItem(CRAVING_DRAFT_KEY) ?? "");
+  const [ingredientIds, setIngredientIds] = useState<string[]>([]);
+  const [onlyInventory, setOnlyInventory] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [activeOrder, setActiveOrder] = useState<ActiveOrder | null>(null);
+  const cravingRef = useRef<HTMLTextAreaElement>(null);
+  const requestLock = useRef(false);
 
-  const ask = async () => {
+  useEffect(() => { localStorage.setItem(CRAVING_DRAFT_KEY, craving); }, [craving]);
+
+  const ask = async (order: ActiveOrder | null = null) => {
+    if (requestLock.current) return;
+    requestLock.current = true;
+    setActiveOrder(order);
     setState("loading");
+    setErr("");
     try {
       const have = PRODUCTS.filter((p) => (stock[p.id]?.current ?? 0) > 0).map((p) => p.name);
       const out = PRODUCTS.filter((p) => (stock[p.id]?.current ?? 0) <= 0).map((p) => p.name);
@@ -28,14 +47,30 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
         missing: out.join(", "),
         planned: planned.join(", "),
         slot: kitchen.breakfast ? "desayuno, almuerzo o comida" : "almuerzo o comida",
+        craving: order?.craving.trim() || undefined,
+        mustUse: (order?.ingredientIds ?? []).map((id) => PRODUCTS.find((product) => product.id === id)?.name).filter((name): name is string => Boolean(name)),
+        onlyInventory: order?.onlyInventory ?? false,
       });
       const order = ["rapido", "saludable", "elegante"];
       setItems(res.slice(0, 3).sort((a, b) => order.indexOf(a.scale) - order.indexOf(b.scale)));
       setState("idle");
     } catch (e) {
-      setErr(String(e instanceof Error ? e.message : e));
+      setErr(String(e instanceof Error ? e.message : e) || "No hubo respuesta. Comprueba tu conexión e inténtalo de nuevo.");
       setState("error");
+    } finally {
+      requestLock.current = false;
     }
+  };
+
+  const submitCraving = () => {
+    const order = { craving: craving.trim().slice(0, 200), ingredientIds: ingredientIds.filter((id) => PRODUCTS.some((product) => product.id === id)), onlyInventory };
+    if (!order.craving && !order.ingredientIds.length) return;
+    void ask(order);
+  };
+
+  const addQuickCraving = (text: string) => {
+    setCraving((current) => `${current.trim()}${current.trim() ? ", " : ""}${text}`.slice(0, 200));
+    cravingRef.current?.focus();
   };
 
   const adopt = (s: AISuggestion, imageUrl?: string, imageMeta?: PhotoMeta) => {
@@ -58,16 +93,28 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
           <h2 className={`${SG_BOLD} text-[22px] leading-7 text-ink`}>Ideas del chef</h2>
           <p className="font-['Nunito:Regular'] text-xs text-ink/50">Con lo que hay en casa · sin repetir la semana</p>
         </div>
-        <SketchButton color="brand" onClick={ask} disabled={state === "loading"}>
+        <SketchButton color="brand" onClick={() => ask(activeOrder)} disabled={state === "loading"}>
           {state === "loading" ? "Pensando…" : items.length ? "↻ Otras ideas" : "✨ Pedir ideas"}
         </SketchButton>
       </div>
 
+      {activeOrder && (
+        <div className="flex items-start gap-2 rounded-xl border border-ink/10 bg-pastel-yellow/60 px-3 py-2">
+          <p className="min-w-0 flex-1 font-['Nunito:Bold'] text-xs text-ink">
+            Pedido: {activeOrder.craving || "a tu gusto"}{activeOrder.ingredientIds.length ? ` · usa: ${activeOrder.ingredientIds.map((id) => PRODUCTS.find((product) => product.id === id)?.name).filter(Boolean).join(", ")}` : ""}
+          </p>
+          <button type="button" aria-label="Quitar pedido" onClick={() => setActiveOrder(null)} className="grid size-8 shrink-0 place-items-center rounded-full text-ink/70 hover:bg-white">
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
       {state === "error" && (
-        <p className="bg-pastel-coral/60 rounded-[16px] p-3 font-['Nunito:Regular'] text-xs text-ink">
-          No se pudieron generar ideas. Revisa que las claves de IA estén guardadas y la función desplegada.<br />
-          <span className="opacity-60">{err.slice(0, 160)}</span>
-        </p>
+        <div role="alert" className="bg-pastel-coral/60 rounded-[16px] p-3 font-['Nunito:Regular'] text-xs text-ink">
+          <p>No se pudieron generar ideas. Revisa tu conexión e inténtalo de nuevo.</p>
+          <p className="mt-1 opacity-60">{err.slice(0, 220)}</p>
+          <button type="button" onClick={() => ask(activeOrder)} className="mt-2 min-h-10 rounded-full border border-ink/30 bg-white px-4 font-['Nunito:Bold'] text-xs">Reintentar</button>
+        </div>
       )}
 
       {state === "loading" && (
@@ -115,6 +162,7 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
                     return <Tag key={j} className={st === "buy" ? "bg-pastel-coral/70" : "bg-app-bg"}>{st === "buy" ? "🛒" : "✓"} {i.name}</Tag>;
                   })}
                 </div>
+                {s.missingNote && <p className="rounded-lg bg-pastel-coral/40 px-2 py-1 font-['Nunito:Regular'] text-xs text-ink">{s.missingNote}</p>}
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-['Nunito:Regular'] text-xs text-ink/50">{toBuy ? `Faltan ${toBuy}` : "Todo en casa"} · {s.steps.length} pasos · <span className="underline">ver receta</span></span>
                   <SketchButton color="yellow" onClick={(e: any) => { e?.stopPropagation?.(); adopt(s); }}>+ Al calendario</SketchButton>
@@ -124,6 +172,45 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
           );
         })}
       </AnimatePresence>
+
+      <div className="space-y-3 rounded-[18px] border border-ink/15 bg-white/70 p-3">
+        <div className="relative">
+          <textarea
+            ref={cravingRef}
+            rows={2}
+            maxLength={200}
+            value={craving}
+            onChange={(event) => {
+              setCraving(event.target.value.slice(0, 200));
+              event.currentTarget.style.height = "auto";
+              event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 88)}px`;
+            }}
+            onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); submitCraving(); } }}
+            placeholder="¿Qué se te antoja? Ej: algo con picadillo, una pasta, sin freír…"
+            aria-label="Describe tu antojo"
+            className="min-h-[52px] max-h-[88px] w-full resize-none overflow-y-auto rounded-xl border border-ink/20 bg-white py-3 pl-3 pr-12 font-['Nunito:Regular'] text-sm leading-[22px] text-ink outline-none focus:border-ink"
+          />
+          {craving && <button type="button" aria-label="Borrar antojo" onClick={() => { setCraving(""); if (cravingRef.current) cravingRef.current.style.height = "52px"; }} className="absolute right-2 top-2 grid size-9 place-items-center rounded-full text-ink/60 hover:bg-app-bg"><X size={16} /></button>}
+          <span className="pointer-events-none absolute bottom-2 right-3 font-['Nunito:Regular'] text-[10px] text-ink/45">{craving.length}/200</span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {QUICK_CRAVINGS.map((quick) => <button type="button" key={quick} onClick={() => addQuickCraving(quick)} className="min-h-10 rounded-full border border-ink/15 bg-white px-3 font-['Nunito:Bold'] text-xs text-ink active:bg-pastel-yellow">{quick}</button>)}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => setPickerOpen(true)} className="min-h-10 rounded-full border border-ink/30 bg-pastel-mint/70 px-3 font-['Nunito:Bold'] text-xs text-ink">＋ Del inventario</button>
+          {ingredientIds.filter((id) => PRODUCTS.some((product) => product.id === id)).map((id) => {
+            const product = PRODUCTS.find((entry) => entry.id === id)!;
+            return <span key={id} className="inline-flex min-h-9 items-center gap-1 rounded-full bg-app-bg px-2.5 font-['Nunito:Bold'] text-xs text-ink">{product.emoji} {product.name}<button type="button" aria-label={`Quitar ${product.name}`} onClick={() => setIngredientIds((current) => current.filter((value) => value !== id))} className="grid size-7 place-items-center rounded-full hover:bg-white"><X size={14} /></button></span>;
+          })}
+        </div>
+
+        <SketchButton color="brand" onClick={submitCraving} disabled={state === "loading" || (!craving.trim() && !ingredientIds.some((id) => PRODUCTS.some((product) => product.id === id)))}>
+          {state === "loading" ? "Pensando…" : "✨ Pedir con este antojo"}
+        </SketchButton>
+      </div>
+      <IngredientPicker open={pickerOpen} selected={ingredientIds} onlyAvailable={onlyInventory} onOpenChange={setPickerOpen} onDone={(ids, onlyAvailable) => { setIngredientIds(ids); setOnlyInventory(onlyAvailable); }} />
       <SuggestionDetailModal s={open} onClose={() => setOpen(null)} onAdopt={adopt} />
     </section>
   );

@@ -2,6 +2,7 @@ import { projectId, publicAnonKey } from "/utils/supabase/info";
 import type { PhotoMeta } from "./data";
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-b709b97b`;
+const CHEF = `https://${projectId}.supabase.co/functions/v1/chef`;
 /** Separate Edge Function for recipe photos (supabase/functions/recipe-photos). */
 const PHOTOS = `https://${projectId}.supabase.co/functions/v1/recipe-photos`;
 
@@ -111,6 +112,8 @@ export async function uploadAvatar(personId: string, file: File): Promise<string
 export type AISuggestion = {
   scale: "rapido" | "saludable" | "elegante";
   name: string;
+  shortName?: string;
+  missingNote?: string;
   emoji: string;
   minutes: number;
   servings?: number;
@@ -119,27 +122,56 @@ export type AISuggestion = {
   steps: string[];
 };
 
-export async function fetchRecipeSuggestions(ctx: { couple: string; inventory: string; missing: string; planned: string; slot?: string }): Promise<AISuggestion[]> {
-  const res = await fetch(`${BASE}/ai/recipes`, {
-    method: "POST",
-    headers: headers({ "Content-Type": "application/json" }),
-    body: JSON.stringify(ctx),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (Array.isArray(data.suggestions)) {
-    data.suggestions = data.suggestions.map((s: AISuggestion) => ({
-      ...s,
-      ingredients: Array.isArray(s.ingredients) ? s.ingredients : [],
-      steps: (Array.isArray(s.steps) ? s.steps : [String(s.steps ?? "")]).map((x) => String(x).trim()).filter(Boolean),
+export type RecipeSuggestionContext = {
+  couple: string;
+  inventory: string;
+  missing: string;
+  planned: string;
+  slot?: string;
+  craving?: string;
+  mustUse?: string[];
+  onlyInventory?: boolean;
+};
+
+async function requestSuggestions(url: string, ctx: RecipeSuggestionContext): Promise<AISuggestion[]> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 90_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(ctx),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !Array.isArray(data.suggestions)) {
+      throw new Error(data.error ?? `HTTP ${res.status}`);
+    }
+    return data.suggestions.map((suggestion: AISuggestion) => ({
+      ...suggestion,
+      ingredients: Array.isArray(suggestion.ingredients) ? suggestion.ingredients : [],
+      steps: (Array.isArray(suggestion.steps) ? suggestion.steps : [String(suggestion.steps ?? "")]).map((step) => String(step).trim()).filter(Boolean),
     }));
+  } finally {
+    clearTimeout(timeout);
   }
-  if (!res.ok || !Array.isArray(data.suggestions)) {
-    console.log(`fetchRecipeSuggestions failed: ${res.status} ${data.error ?? ""}`);
-    throw new Error(data.error ?? `HTTP ${res.status}`);
-  }
-  return data.suggestions;
 }
 
+export async function fetchRecipeSuggestions(ctx: RecipeSuggestionContext): Promise<AISuggestion[]> {
+  try {
+    return await requestSuggestions(`${CHEF}/chef/recipes`, ctx);
+  } catch (chefError) {
+    console.warn(`Chef suggestions failed; falling back to legacy route: ${chefError}`);
+    try {
+      return await requestSuggestions(`${BASE}/ai/recipes`, ctx);
+    } catch (legacyError) {
+      if ((chefError as Error)?.name === "AbortError" || (legacyError as Error)?.name === "AbortError") {
+        throw new Error("La cocina tardó demasiado en responder. Comprueba tu conexión e inténtalo de nuevo.");
+      }
+      throw new Error(`No se pudieron generar ideas. Chef: ${String(chefError)}. Respaldo: ${String(legacyError)}`);
+    }
+  }
+}
 
 // ---------- Recipe photos ----------
 export type PhotoEvent = {
