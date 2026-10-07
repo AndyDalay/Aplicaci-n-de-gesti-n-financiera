@@ -23,6 +23,9 @@ app.post(`${P}/chef/recipes`, async (c) => {
     const mustUse = Array.isArray(body.mustUse)
       ? [...new Set(body.mustUse.filter((value: unknown): value is string => typeof value === "string").map((value: string) => value.trim()).filter(Boolean))].slice(0, 20)
       : [];
+    const productCatalog = Array.isArray(body.productCatalog)
+      ? body.productCatalog.filter((product: unknown) => product && typeof product === "object" && typeof (product as { id?: unknown }).id === "string" && typeof (product as { name?: unknown }).name === "string").map((product: { id: string; name: string }) => ({ id: product.id.slice(0, 80), name: product.name.slice(0, 100) })).slice(0, 80)
+      : [];
     const input: ChefInput = {
       couple: typeof body.couple === "string" ? body.couple.slice(0, 300) : "pareja cubana que cocina para 2 personas",
       inventory: typeof body.inventory === "string" ? body.inventory.slice(0, 5000) : "",
@@ -32,6 +35,7 @@ app.post(`${P}/chef/recipes`, async (c) => {
       craving,
       mustUse,
       onlyInventory: body.onlyInventory === true,
+      productCatalog,
     };
     const suggestions = await suggestChefRecipes(input);
     return c.json({ suggestions });

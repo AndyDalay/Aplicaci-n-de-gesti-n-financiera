@@ -50,6 +50,7 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
         craving: order?.craving.trim() || undefined,
         mustUse: (order?.ingredientIds ?? []).map((id) => PRODUCTS.find((product) => product.id === id)?.name).filter((name): name is string => Boolean(name)),
         onlyInventory: order?.onlyInventory ?? false,
+        productCatalog: PRODUCTS.map(({ id, name }) => ({ id, name })),
       });
       const order = ["rapido", "saludable", "elegante"];
       setItems(res.slice(0, 3).sort((a, b) => order.indexOf(a.scale) - order.indexOf(b.scale)));
@@ -78,7 +79,14 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
     const rid = saveRecipe({
       name: s.name, emoji: s.emoji || "🍲", minutes: s.minutes, description: s.description,
       scale: SCALE_META[s.scale] ? s.scale : undefined,
-      ingredients: s.ingredients.map((i) => ({ name: i.name, qty: i.qty, productId: matchProduct(i.name)?.id })),
+      ingredients: s.ingredients.map((i) => ({
+        name: i.name,
+        qty: i.qty,
+        productId: i.productId ?? matchProduct(i.name)?.id,
+        amount: i.amount,
+        unit: i.unit,
+        note: i.note,
+      })),
       steps: s.steps,
       imageUrl: imageUrl || undefined,
       imageMeta: imageUrl ? imageMeta : undefined,

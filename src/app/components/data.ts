@@ -23,6 +23,11 @@ export const CATEGORIES: Category[] = [
   { id: "otros", name: "Otros", emoji: "📦", color: "bg-cream", hex: "#FFF6E0" },
 ];
 
+export type MeasureBase = "g" | "ml" | "u";
+export type RecipeUnit = MeasureBase | "taza" | "cda" | "cdta";
+export type ProductMeasure = { base: MeasureBase; pack: number; density?: number; measureConfirmed: boolean };
+export type ProductMeasureOverrides = Record<string, Partial<ProductMeasure>>;
+
 export type Product = {
   id: string;
   name: string;
@@ -32,7 +37,13 @@ export type Product = {
   pricePerUnitCUP: number;
   monthlyQuantity: number;
   unit?: string;
+  base: MeasureBase;
+  pack: number;
+  density?: number;
+  measureConfirmed: boolean;
 };
+
+type ProductCatalogItem = Omit<Product, "base" | "pack" | "density" | "measureConfirmed">;
 
 const p = (
   id: string,
@@ -42,9 +53,9 @@ const p = (
   subcategory: string,
   pricePerUnitCUP: number,
   monthlyQuantity: number,
-): Product => ({ id, name, emoji, category, subcategory, pricePerUnitCUP, monthlyQuantity });
+): ProductCatalogItem => ({ id, name, emoji, category, subcategory, pricePerUnitCUP, monthlyQuantity });
 
-export const PRODUCTS: Product[] = [
+const PRODUCT_CATALOG: ProductCatalogItem[] = [
   p("cafe", "Café", "☕", "bebidas", "Caliente", 2000, 2),
   p("te", "Té", "🍵", "bebidas", "Caliente", 50, 4),
   p("yogurt", "Yogurt", "🥛", "bebidas", "Frío", 500, 4),
@@ -103,6 +114,90 @@ export const PRODUCTS: Product[] = [
 
   p("carbon", "Carbón", "🪵", "otros", "Cocina", 2000, 1),
 ];
+
+export const PRODUCT_MEASURES: Record<string, Omit<ProductMeasure, "measureConfirmed">> = {
+  cafe: { base: "g", pack: 250, density: 200 }, te: { base: "g", pack: 50 }, yogurt: { base: "ml", pack: 1000 },
+  maltas: { base: "ml", pack: 355 }, "vino-seco": { base: "ml", pack: 750 }, "leche-cond": { base: "g", pack: 395 }, "leche-polvo": { base: "g", pack: 400 },
+  "san-jacobo": { base: "g", pack: 500 }, "caja-pollo": { base: "g", pack: 5000 }, hamburguesa: { base: "g", pack: 100 }, picadillo: { base: "g", pack: 500 }, "carne-cerdo": { base: "g", pack: 1000 }, lomo: { base: "g", pack: 1000 }, perrito: { base: "u", pack: 1 }, jamon: { base: "g", pack: 250 },
+  pepino: { base: "u", pack: 1 }, lechuga: { base: "u", pack: 1 }, cebolla: { base: "g", pack: 500 }, ajo: { base: "g", pack: 100 }, aji: { base: "u", pack: 1 }, tomates: { base: "g", pack: 500 }, col: { base: "u", pack: 1 },
+  boniato: { base: "g", pack: 1000 }, yuca: { base: "g", pack: 1000 }, "plat-fruta": { base: "u", pack: 1 }, "plat-vianda": { base: "u", pack: 1 }, pina: { base: "u", pack: 1 },
+  arroz: { base: "g", pack: 1000, density: 200 }, "frijoles-n": { base: "g", pack: 500, density: 190 }, spaguetti: { base: "g", pack: 500 }, coditos: { base: "g", pack: 500 },
+  queso: { base: "g", pack: 250 }, huevos: { base: "u", pack: 30 }, helado: { base: "ml", pack: 1000 },
+  "galletas-m": { base: "g", pack: 200 }, "galletas-s": { base: "g", pack: 150 }, papas: { base: "g", pack: 1000 }, "bolsa-pan": { base: "u", pack: 8 }, mermelada: { base: "g", pack: 250 },
+  sal: { base: "g", pack: 500 }, sazon: { base: "g", pack: 50 }, vinagre: { base: "ml", pack: 500 }, aceite: { base: "ml", pack: 1000 }, azucar: { base: "g", pack: 1000, density: 200 },
+  jabone: { base: "u", pack: 1 }, "pasta-d": { base: "ml", pack: 100 }, "papel-s": { base: "u", pack: 4 }, carbon: { base: "g", pack: 3000 },
+};
+
+export const PRODUCTS: Product[] = PRODUCT_CATALOG.map((product) => ({
+  ...product,
+  ...(PRODUCT_MEASURES[product.id] ?? { base: "u" as const, pack: 1 }),
+  measureConfirmed: false,
+}));
+
+export function resolveProductMeasure(product: Product, overrides: ProductMeasureOverrides = {}): Product {
+  return { ...product, ...overrides[product.id] };
+}
+
+export function amountOf(stockItem: StockItem, product: Product): number {
+  return packsToAmount(stockItem.current, product);
+}
+
+export function packsToAmount(packs: number, product: Product): number {
+  return Math.max(0, packs) * product.pack;
+}
+
+export function amountToPacks(amount: number, product: Product): number {
+  return product.pack > 0 ? Math.max(0, amount) / product.pack : 0;
+}
+
+export function formatAmount(amount: number, base: MeasureBase): string {
+  const safeAmount = Math.max(0, amount);
+  const number = (value: number) => new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1 }).format(value);
+  if (base === "g" && safeAmount >= 1000) return `${number(safeAmount / 1000)} kg`;
+  if (base === "ml" && safeAmount >= 1000) return `${number(safeAmount / 1000)} l`;
+  return `${number(safeAmount)} ${base}`;
+}
+
+export function parseQty(text: string): { amount: number; unit: RecipeUnit } | null {
+  const clean = text.trim().toLocaleLowerCase("es").replace(/,/g, ".");
+  const match = clean.match(/^\s*(?:(\d+\s*\/\s*\d+)|(\d+(?:\.\d+)?)|un|una|uno|dos|tres|media|medio)\s*([^\d\s]+)?/u);
+  if (!match) return null;
+  const token = (match[1] ?? match[2] ?? match[0]).replace(/\s/g, "");
+  const amount = match[1]
+    ? Number(match[1].replace(/\s/g, "").split("/")[0]) / Number(match[1].replace(/\s/g, "").split("/")[1])
+    : ({ un: 1, una: 1, uno: 1, dos: 2, tres: 3, media: 0.5, medio: 0.5 } as Record<string, number>)[token] ?? Number(token);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  const label = (match[3] ?? "").replace(/\.$/, "").trim();
+  if (["kg", "kilo", "kilos", "kilogramo", "kilogramos"].includes(label)) return { amount: amount * 1000, unit: "g" };
+  if (["g", "gr", "gramo", "gramos"].includes(label)) return { amount, unit: "g" };
+  if (["lb", "lbs", "libra", "libras"].includes(label)) return { amount: amount * 453.6, unit: "g" };
+  if (["ml", "mililitro", "mililitros"].includes(label)) return { amount, unit: "ml" };
+  if (["l", "litro", "litros"].includes(label)) return { amount: amount * 1000, unit: "ml" };
+  if (["taza", "tazas"].includes(label)) return { amount, unit: "taza" };
+  if (["cda", "cdas", "cucharada", "cucharadas"].includes(label)) return { amount, unit: "cda" };
+  if (["cdta", "cdtas", "cucharadita", "cucharaditas"].includes(label)) return { amount, unit: "cdta" };
+  if (["u", "unidad", "unidades", "und", "paquete", "paquetes", "lata", "latas", "carton", "cartones", "diente", "dientes"].includes(label)) return { amount, unit: "u" };
+  return null;
+}
+
+export function toBase(ingredient: RecipeIngredient, product: Product): { amount: number; base: MeasureBase } | null {
+  const parsed = ingredient.amount !== undefined && ingredient.unit
+    ? { amount: ingredient.amount, unit: ingredient.unit }
+    : parseQty(ingredient.qty);
+  if (!parsed || !Number.isFinite(parsed.amount) || parsed.amount < 0) return null;
+  if (parsed.unit === product.base) return { amount: parsed.amount, base: product.base };
+  if (product.base === "g" && parsed.unit === "taza" && product.density) return { amount: parsed.amount * product.density, base: "g" };
+  if (product.base === "ml") {
+    if (parsed.unit === "taza") return { amount: parsed.amount * 240, base: "ml" };
+    if (parsed.unit === "cda") return { amount: parsed.amount * 15, base: "ml" };
+    if (parsed.unit === "cdta") return { amount: parsed.amount * 5, base: "ml" };
+  }
+  if (product.base === "g" && product.density) {
+    if (parsed.unit === "cda") return { amount: parsed.amount * product.density / 16, base: "g" };
+    if (parsed.unit === "cdta") return { amount: parsed.amount * product.density / 48, base: "g" };
+  }
+  return null;
+}
 
 export type Person = {
   id: string;
@@ -172,9 +267,9 @@ export const getProductPrice = (productId: string, overrides: Record<string, num
 export const formatMoney = (cup: number, currency: Currency, rate: number) => {
   if (currency === "USD") {
     const v = cup / rate;
-    return `$${v.toFixed(2)}`;
+    return `$${new Intl.NumberFormat("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v)}`;
   }
-  return `${Math.round(cup).toLocaleString("es-CU")} CUP`;
+  return `${new Intl.NumberFormat("es-ES").format(Math.round(cup))} CUP`;
 };
 
 // ── Cocina ─────────────────────────────────────────────
@@ -185,7 +280,7 @@ export const MEAL_SLOTS: { id: MealSlot; label: string; emoji: string }[] = [
   { id: "comida", label: "Comida", emoji: "🌙" },
 ];
 
-export type RecipeIngredient = { productId?: string; name: string; qty: string };
+export type RecipeIngredient = { productId?: string; name: string; qty: string; amount?: number; unit?: RecipeUnit; note?: string };
 export type RecipeScale = "rapido" | "saludable" | "elegante";
 /** Where a recipe photo came from; `credit`/`link` are shown for stock photos (attribution). */
 export type PhotoMeta = { source: "stock" | "ai" | "user"; credit?: string; link?: string };

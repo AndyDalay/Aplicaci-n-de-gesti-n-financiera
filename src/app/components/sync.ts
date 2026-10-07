@@ -118,7 +118,7 @@ export type AISuggestion = {
   minutes: number;
   servings?: number;
   description: string;
-  ingredients: { name: string; qty: string }[];
+  ingredients: { name: string; qty: string; productId?: string; amount?: number; unit?: "g" | "ml" | "u" | "taza" | "cda" | "cdta"; note?: string }[];
   steps: string[];
 };
 
@@ -131,6 +131,7 @@ export type RecipeSuggestionContext = {
   craving?: string;
   mustUse?: string[];
   onlyInventory?: boolean;
+  productCatalog?: { id: string; name: string }[];
 };
 
 async function requestSuggestions(url: string, ctx: RecipeSuggestionContext): Promise<AISuggestion[]> {
@@ -149,7 +150,10 @@ async function requestSuggestions(url: string, ctx: RecipeSuggestionContext): Pr
     }
     return data.suggestions.map((suggestion: AISuggestion) => ({
       ...suggestion,
-      ingredients: Array.isArray(suggestion.ingredients) ? suggestion.ingredients : [],
+      ingredients: Array.isArray(suggestion.ingredients) ? suggestion.ingredients.map((ingredient) => ({
+        ...ingredient,
+        qty: ingredient.qty ?? (ingredient.amount !== undefined && ingredient.unit ? `${ingredient.amount} ${ingredient.unit}` : ""),
+      })) : [],
       steps: (Array.isArray(suggestion.steps) ? suggestion.steps : [String(suggestion.steps ?? "")]).map((step) => String(step).trim()).filter(Boolean),
     }));
   } finally {

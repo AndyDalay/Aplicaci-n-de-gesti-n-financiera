@@ -2,6 +2,75 @@ import { useEffect, useRef, useState } from "react";
 import { Camera, DollarSign } from "lucide-react";
 import { useApp } from "../AppContext";
 import { SketchCard, SketchButton, Input, Pill, CurrencyToggle, ViewModeToggle, Switch } from "../ui-kit";
+import { CATEGORIES, MeasureBase, PRODUCTS, resolveProductMeasure } from "../data";
+
+type MeasureDraft = { base: MeasureBase; pack: string; density: string };
+
+function EquivalencesSection() {
+  const { productMeasures, setProductMeasure } = useApp();
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, MeasureDraft>>({});
+
+  useEffect(() => {
+    setDrafts(Object.fromEntries(PRODUCTS.map((product) => {
+      const measure = resolveProductMeasure(product, productMeasures);
+      return [product.id, { base: measure.base, pack: String(measure.pack), density: measure.density === undefined ? "" : String(measure.density) }];
+    })));
+  }, [productMeasures]);
+
+  const visible = PRODUCTS.filter((product) =>
+    (!category || product.category === category) && product.name.toLocaleLowerCase("es").includes(query.toLocaleLowerCase("es")),
+  );
+
+  const update = (productId: string, patch: Partial<MeasureDraft>) => {
+    setDrafts((current) => ({ ...current, [productId]: { ...current[productId], ...patch } }));
+  };
+
+  const save = (productId: string) => {
+    const draft = drafts[productId];
+    const pack = Number(draft?.pack);
+    const density = draft?.density.trim() ? Number(draft.density) : undefined;
+    if (!draft || !Number.isFinite(pack) || pack <= 0 || (density !== undefined && (!Number.isFinite(density) || density <= 0))) return;
+    setProductMeasure(productId, { base: draft.base, pack, ...(density ? { density } : {}) });
+  };
+
+  return (
+    <SketchCard color="bg-pastel-peach" className="p-3">
+      <h3 className="leading-none mb-1">Equivalencias</h3>
+      <p className="mb-3 text-xs text-ink/60">Define cuánto trae un pack para calcular el inventario real.</p>
+      <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar producto…" aria-label="Buscar equivalencia" />
+      <div className="-mx-1 my-2 flex gap-2 overflow-x-auto px-1 pb-1">
+        <button type="button" onClick={() => setCategory("")} aria-pressed={!category} className={`min-h-10 shrink-0 rounded-full border px-3 text-xs font-bold ${!category ? "border-ink bg-pastel-yellow" : "border-ink/20 bg-white"}`}>Todas</button>
+        {CATEGORIES.map((item) => <button key={item.id} type="button" onClick={() => setCategory(item.id)} aria-pressed={category === item.id} className={`min-h-10 shrink-0 rounded-full border px-3 text-xs font-bold ${category === item.id ? "border-ink bg-pastel-yellow" : "border-ink/20 bg-white"}`}>{item.emoji} {item.name}</button>)}
+      </div>
+      <div className="max-h-[55vh] space-y-2 overflow-y-auto pr-1">
+        {visible.map((product) => {
+          const measure = resolveProductMeasure(product, productMeasures);
+          const draft = drafts[product.id] ?? { base: measure.base, pack: String(measure.pack), density: measure.density ? String(measure.density) : "" };
+          return (
+            <div key={product.id} className="rounded-xl border border-ink/10 bg-white p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate font-['Nunito:Bold'] text-sm">{product.emoji} {product.name}</span>
+                <Pill color={measure.measureConfirmed ? "bg-pastel-mint" : "bg-pastel-yellow"}>{measure.measureConfirmed ? "Confirmado" : "Por confirmar"}</Pill>
+              </div>
+              <p className="mb-1 text-[11px] text-ink/60">1 unidad de {product.name} =</p>
+              <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-2">
+                <Input type="number" min="0.001" step="any" inputMode="decimal" aria-label={`Cantidad por pack de ${product.name}`} value={draft.pack} onChange={(event) => update(product.id, { pack: event.target.value })} />
+                <select aria-label={`Unidad base de ${product.name}`} value={draft.base} onChange={(event) => update(product.id, { base: event.target.value as MeasureBase })} className="min-h-11 rounded-xl border border-ink/20 bg-white px-2 text-sm">
+                  <option value="g">g</option><option value="ml">ml</option><option value="u">u</option>
+                </select>
+              </div>
+              {draft.base === "g" && <label className="mt-2 block text-xs text-ink/60">Densidad (g por taza, opcional)<Input type="number" min="0.001" step="any" inputMode="decimal" value={draft.density} onChange={(event) => update(product.id, { density: event.target.value })} placeholder="Ej. 200" className="mt-1" /></label>}
+              <button type="button" onClick={() => save(product.id)} disabled={!Number(draft.pack) || Number(draft.pack) <= 0} className="mt-2 min-h-10 rounded-full border border-ink/25 bg-pastel-mint px-3 text-xs font-bold disabled:opacity-40">Guardar equivalencia</button>
+            </div>
+          );
+        })}
+        {!visible.length && <p className="py-6 text-center text-sm text-ink/60">No hay productos con esos filtros.</p>}
+      </div>
+    </SketchCard>
+  );
+}
 
 export function SettingsPage() {
   const { people, setPeople, currentUserId, setCurrentUserId, rate, setRate, defaultCurrency, setDefaultCurrency, viewMode, setViewMode, uploadAvatarFor, kitchen, setKitchen } = useApp();
@@ -84,6 +153,8 @@ export function SettingsPage() {
           <p className="text-xs text-muted-foreground mt-1">Actual: 1 USD = {rate} CUP</p>
         </div>
       </SketchCard>
+
+      <EquivalencesSection />
 
       <SketchCard color="bg-pastel-mint" className="p-3">
         <h3 className="leading-none mb-2">Cocina</h3>

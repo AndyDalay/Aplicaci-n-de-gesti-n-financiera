@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useApp } from "../AppContext";
-import { CATEGORIES, getCategory, getProductPrice, PRODUCTS, Product, formatMoney } from "../data";
+import { CATEGORIES, formatAmount, getCategory, getProductPrice, PRODUCTS, Product, formatMoney, resolveProductMeasure } from "../data";
 import { CategoryIcon, Input } from "../ui-kit";
 import { getStockStatus } from "../StockMeter";
 import { InventoryItemCard } from "../inventory/InventoryItemCard";
@@ -9,7 +9,7 @@ import { motion } from "motion/react";
 import { EditPriceModal } from "../EditPriceModal";
 
 export function InventoryPage() {
-  const { stock, updateStock, currency, rate, addShopping, removeShopping, shopping, priceOverrides } = useApp();
+  const { stock, updateStock, currency, rate, addShopping, removeShopping, shopping, priceOverrides, productMeasures } = useApp();
   const [filter, setFilter] = useState<string>("");
   const [q, setQ] = useState("");
   const [editingPrice, setEditingPrice] = useState<Product | null>(null);
@@ -80,6 +80,7 @@ export function InventoryPage() {
             <div className="grid gap-4 sm:grid-cols-2">
               {items.map((p) => {
                 const s = stock[p.id];
+                const measure = resolveProductMeasure(p, productMeasures);
                 const status = getStockStatus(s.current, s.max);
                 const listItem = shopping.find((it) => it.productId === p.id && !it.bought);
                 return (
@@ -88,16 +89,18 @@ export function InventoryPage() {
                       emoji={p.emoji}
                       tint={cat.color}
                       name={p.name}
-                      qty={<span className="flex gap-px items-center"><span className="font-['Nunito:Bold'] font-bold">{s.current}</span><span className="font-['Nunito:Regular']">/{s.max} {p.unit ?? p.subcategory}</span></span>}
+                      qty={<span className="flex items-center gap-1"><span className="font-['Nunito:Bold'] font-bold">{measure.measureConfirmed ? "" : "≈ "}{formatAmount(s.current * measure.pack, measure.base)}</span>{!measure.measureConfirmed && <span className="rounded-full bg-pastel-yellow px-1.5 py-0.5 text-[9px] font-bold">por confirmar</span>}</span>}
                       price={formatMoney(getProductPrice(p.id, priceOverrides), currency, rate)}
                       current={s.current}
                       max={s.max}
+                      product={measure}
+                      measureConfirmed={measure.measureConfirmed}
                       inList={!!listItem}
                       onStock={(v) => updateStock(p.id, v)}
                       onEditPrice={() => setEditingPrice(p)}
                       onToggleList={(on) => {
                         if (!on) { if (listItem) removeShopping(listItem.id); return; }
-                        const suggestedQty = status.fraction === 0 ? p.monthlyQuantity : Math.ceil(p.monthlyQuantity / 2);
+                        const suggestedQty = status.fraction === 0 ? Math.ceil(p.monthlyQuantity) : Math.ceil(p.monthlyQuantity / 2);
                         addShopping({ productId: p.id, qtySuggested: suggestedQty, priority: status.fraction === 0 ? "alta" : "normal" });
                       }}
                     />

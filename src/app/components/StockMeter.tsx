@@ -26,11 +26,15 @@ export function StockMeter({
   max,
   onChange,
   size = "md",
+  amountLabel,
+  percentage,
 }: {
   current: number;
   max: number;
   onChange?: (v: number) => void;
   size?: "sm" | "md" | "lg";
+  amountLabel?: string;
+  percentage?: number;
 }) {
   const status = getStockStatus(current, max);
   const segHeight = size === "sm" ? "h-2" : size === "lg" ? "h-4" : "h-3";
@@ -51,7 +55,7 @@ export function StockMeter({
       </div>
       {size !== "sm" && (
         <div className="flex items-center justify-between">
-          <span className="font-['Sour_Gummy:Regular'] wdth text-base leading-6 text-ink">{filled}/4</span>
+          <span className="font-['Sour_Gummy:Regular'] wdth text-base leading-6 text-ink">{amountLabel ? `${amountLabel}${percentage !== undefined ? ` · ${Math.round(percentage)} %` : ""}` : `${filled}/4`}</span>
           <span className={`font-['Sour_Gummy:SemiBold'] font-semibold wdth text-base leading-4 ${status.ink}`}>{status.label}</span>
         </div>
       )}

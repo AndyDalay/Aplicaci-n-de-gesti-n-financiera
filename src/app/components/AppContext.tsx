@@ -7,6 +7,8 @@ import {
   Movement,
   Person,
   PRODUCTS,
+  ProductMeasure,
+  ProductMeasureOverrides,
   ShoppingItem,
   StockItem,
   DEFAULT_RECIPES,
@@ -42,6 +44,7 @@ type SharedState = {
   recipes: Recipe[];
   weeks: Record<string, WeekPlan>;
   kitchen: { breakfast: boolean };
+  productMeasures: ProductMeasureOverrides;
 };
 
 type Ctx = {
@@ -77,6 +80,8 @@ type Ctx = {
 
   priceOverrides: Record<string, number>;
   setProductPrice: (productId: string, priceCUP: number) => void;
+  productMeasures: ProductMeasureOverrides;
+  setProductMeasure: (productId: string, measure: Omit<ProductMeasure, "measureConfirmed">) => void;
 
   notifications: SharedNotification[];
   unreadCount: number;
@@ -127,6 +132,7 @@ const defaultShared = (): SharedState => ({
   recipes: DEFAULT_RECIPES,
   weeks: {},
   kitchen: { breakfast: false },
+  productMeasures: {},
   notifications: [{ id: id(), title: "🏡 Casita lista", body: "Andy y Rachel ya pueden colaborar.", at: Date.now(), readBy: [] }],
 });
 
@@ -143,6 +149,7 @@ const normalizeShared = (state: Partial<SharedState>): SharedState => ({
   recipes: state.recipes ?? DEFAULT_RECIPES,
   weeks: state.weeks ?? {},
   kitchen: state.kitchen ?? { breakfast: false },
+  productMeasures: state.productMeasures ?? {},
 });
 
 function fireOSNotification(title: string, body: string) {
@@ -330,7 +337,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (ratio <= 0.25) {
       const exists = shopping.some((i) => i.productId === productId && !i.bought);
       if (!exists && product) {
-        const qty = clamped === 0 ? product.monthlyQuantity : Math.ceil(product.monthlyQuantity / 2);
+        const qty = clamped === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2);
         shopping = [
           { id: id(), productId, qtySuggested: qty, priority: clamped === 0 ? "alta" : "normal", createdAt: Date.now() },
           ...shopping,
@@ -342,7 +349,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             ? {
                 ...i,
                 priority: clamped === 0 ? "alta" : "normal",
-                qtySuggested: clamped === 0 ? product.monthlyQuantity : Math.ceil(product.monthlyQuantity / 2),
+                qtySuggested: clamped === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2),
               }
             : i,
         );
@@ -393,6 +400,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         { id: id(), title: "💲 Precio actualizado", body: `${PRODUCTS.find(p => p.id === productId)?.name ?? "Producto"} → ${Math.round(priceCUP).toLocaleString("es-CU")} CUP`, at: Date.now(), readBy: [] },
         ...s.notifications,
       ].slice(0, 50),
+    }));
+
+  const setProductMeasure = (productId: string, measure: Omit<ProductMeasure, "measureConfirmed">) =>
+    mutate((s) => ({
+      ...s,
+      productMeasures: { ...s.productMeasures, [productId]: { ...measure, measureConfirmed: true } },
     }));
 
   const pushNotification: Ctx["pushNotification"] = (n) =>
@@ -532,6 +545,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       movements: shared.movements, addMovement, removeMovement, updateMovement,
       fixed: shared.fixed, setFixed,
       priceOverrides: shared.priceOverrides, setProductPrice,
+      productMeasures: shared.productMeasures, setProductMeasure,
       notifications: shared.notifications, unreadCount, pushNotification, markAllRead,
       recipes: shared.recipes, saveRecipe, removeRecipe,
       weeks: shared.weeks, setMeal, kitchen: shared.kitchen, setKitchen, shopMissing,

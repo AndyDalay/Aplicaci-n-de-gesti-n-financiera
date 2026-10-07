@@ -9,9 +9,10 @@ Escribes UNA receta COMPLETA y REALISTA del tipo pedido. Obligatorio:
 - El antojo del usuario es la prioridad absoluta: las 3 ideas deben respetarlo. Si hay ingredientes obligatorios, cada idea debe incluir todos esos ingredientes. Si el antojo exige algo que no hay, dilo en un campo missingNote y propone la alternativa más cercana sin ignorar el antojo.
 - Si onlyInventory es true, usa únicamente ingredientes indicados como disponibles, además de sal/agua y condimentos básicos solo si aparecen en el inventario. Nunca presentes como disponible un ingrediente agotado. Ingredientes obligatorios tienen prioridad e indican explícitamente si no están en casa.
 - shortName debe tener como máximo 8 palabras y servir como nombre breve de la receta.
+- En cada ingrediente devuelve amount numérico y unit (g, ml, u, taza, cda o cdta), productId elegido SOLO entre los IDs del catálogo enviado y note opcional. Si no hay coincidencia, productId debe ser null; no inventes IDs.
 
 Responde SOLO JSON válido, sin texto extra ni markdown, con este formato:
-{"scale":"rapido|saludable|elegante","name":"","shortName":"","missingNote":"","emoji":"","minutes":0,"servings":2,"description":"una frase apetitosa","ingredients":[{"name":"","qty":""}],"steps":[""]}
+{"scale":"rapido|saludable|elegante","name":"","shortName":"","missingNote":"","emoji":"","minutes":0,"servings":2,"description":"una frase apetitosa","ingredients":[{"name":"","productId":null,"amount":0,"unit":"g","note":""}],"steps":[""]}
 Todo en español de Cuba, claro y directo.
 
 EJEMPLO de nivel de detalle esperado (otro plato):
@@ -40,7 +41,9 @@ export type ChefInput = {
   craving?: string;
   mustUse?: string[];
   onlyInventory?: boolean;
+  productCatalog?: { id: string; name: string }[];
 };
+type ChefUnit = "g" | "ml" | "u" | "taza" | "cda" | "cdta";
 export type ChefRecipe = {
   scale: RecipeScale;
   name: string;
@@ -50,7 +53,7 @@ export type ChefRecipe = {
   minutes: number;
   servings?: number;
   description: string;
-  ingredients: { name: string; qty: string }[];
+  ingredients: { name: string; productId?: string; amount: number; unit: ChefUnit; qty: string; note?: string }[];
   steps: string[];
 };
 
@@ -85,14 +88,32 @@ function toSteps(raw: unknown): string[] {
   }).map((step) => step.replace(/^\s*(paso\s*)?\d{1,2}\s*[.):-]\s*/i, "").replace(/^[-•*]\s*/, "").trim()).filter(Boolean);
 }
 
-function parseRecipe(raw: unknown, scale: RecipeScale, mustUse: string[]): ChefRecipe {
+function parseRecipe(raw: unknown, scale: RecipeScale, mustUse: string[], catalog: { id: string; name: string }[]): ChefRecipe {
   const data = extractObject(raw);
   const name = String(data.name ?? "").trim();
   if (!name) throw new Error("La IA no incluyó el nombre de la receta.");
-  const ingredients = Array.isArray(data.ingredients) ? data.ingredients.filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).name).map((item) => ({
-    name: String((item as Record<string, unknown>).name),
-    qty: String((item as Record<string, unknown>).qty ?? ""),
-  })) : [];
+  const rawIngredients = Array.isArray(data.ingredients) ? data.ingredients.filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).name) : [];
+  const units: ChefUnit[] = ["g", "ml", "u", "taza", "cda", "cdta"];
+  const ingredients = rawIngredients.map((item) => {
+    const rawIngredient = item as Record<string, unknown>;
+    const ingredientName = String(rawIngredient.name).trim();
+    const amount = Number(rawIngredient.amount);
+    const unit = String(rawIngredient.unit ?? "") as ChefUnit;
+    if (!ingredientName || !Number.isFinite(amount) || amount <= 0 || !units.includes(unit)) {
+      throw new Error(`Ingrediente sin cantidad/unidad estructurada válida: ${ingredientName || "sin nombre"}.`);
+    }
+    const candidateId = typeof rawIngredient.productId === "string" ? rawIngredient.productId : "";
+    const product = catalog.find((entry) => entry.id === candidateId)
+      ?? catalog.find((entry) => normalize(entry.name) === normalize(ingredientName));
+    return {
+      name: ingredientName,
+      productId: product?.id,
+      amount,
+      unit,
+      qty: `${amount} ${unit}`,
+      ...(typeof rawIngredient.note === "string" && rawIngredient.note.trim() ? { note: rawIngredient.note.trim().slice(0, 160) } : {}),
+    };
+  });
   const normalizedIngredients = ingredients.map((item) => normalize(item.name));
   const absentRequired = mustUse.filter((required) => !normalizedIngredients.some((name) => name.includes(normalize(required)) || normalize(required).includes(name)));
   if (absentRequired.length) throw new Error(`La receta no incluyó los ingredientes obligatorios: ${absentRequired.join(", ")}.`);
@@ -123,6 +144,8 @@ function promptFor(input: ChefInput, scale: RecipeScale): string {
     input.slot ? `Comida a cubrir: ${input.slot}.` : "",
     `Antojo (prioridad absoluta): ${input.craving?.trim() || "sin preferencia escrita"}. Las tres escalas deben respetarlo.`,
     `Ingredientes obligatorios para esta receta: ${required}. Incluye todos literalmente en ingredients.`,
+    `Catálogo válido para productId (elige solo IDs de esta lista): ${JSON.stringify(input.productCatalog ?? [])}.`,
+    `Cada ingrediente debe incluir amount como número y unit entre g, ml, u, taza, cda o cdta. Conserva la unidad culinaria real; no conviertas tazas a gramos sin densidad proporcionada.`,
     `Restricción solo inventario: ${input.onlyInventory ? "SÍ, evita todo ingrediente no disponible salvo básicos que sí estén listados" : "NO, se permiten ingredientes faltantes y deben anotarse en missingNote"}.`,
     `Escribe UNA receta. ${SCALE_BRIEF[scale]}`,
   ].filter(Boolean).join("\n");
@@ -160,7 +183,7 @@ async function recipeFor(input: ChefInput, scale: RecipeScale): Promise<ChefReci
     }
     for (const model of provider.models) {
       try {
-        const recipe = parseRecipe(await complete(model, provider.url, key, prompt, provider.json), scale, input.mustUse ?? []);
+        const recipe = parseRecipe(await complete(model, provider.url, key, prompt, provider.json), scale, input.mustUse ?? [], input.productCatalog ?? []);
         console.log(`chef recipe ${scale} via ${model}`);
         return recipe;
       } catch (error) {
