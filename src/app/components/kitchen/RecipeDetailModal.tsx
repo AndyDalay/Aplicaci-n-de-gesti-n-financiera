@@ -11,7 +11,7 @@ const STATUS = {
   buy: { label: "Hay que comprar", cls: "bg-pastel-coral" },
 } as const;
 
-export function RecipeDetailModal({ recipe, onClose, onEdit }: { recipe: Recipe | null; onClose: () => void; onEdit: (r: Recipe) => void }) {
+export function RecipeDetailModal({ recipe, onClose, onEdit, onCook }: { recipe: Recipe | null; onClose: () => void; onEdit: (r: Recipe) => void; onCook?: (r: Recipe) => void }) {
   const { stock, people, shopMissing, pushNotification, saveRecipe } = useApp();
   const r = recipe;
   const cook = people.find((p) => p.id === r?.cookId);
@@ -72,9 +72,16 @@ export function RecipeDetailModal({ recipe, onClose, onEdit }: { recipe: Recipe 
             </ol>
           </section>
 
-          <SketchButton block onClick={() => onEdit(r)}>
-            <img src="/assets/4ea72.svg" alt="" className="size-4" /> Editar receta
-          </SketchButton>
+          <div className="flex gap-2">
+            <SketchButton block onClick={() => onEdit(r)}>
+              <img src="/assets/4ea72.svg" alt="" className="size-4" /> Editar receta
+            </SketchButton>
+            {onCook && (
+              <SketchButton color="mint" block onClick={() => onCook(r)}>
+                ✅ Cocinamos esto
+              </SketchButton>
+            )}
+          </div>
         </div>
       )}
     </Modal>

@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
 import { Modal } from "../Modal";
 import { Select, SketchButton } from "../ui-kit";
-import { MEAL_SLOTS, MealSlot, parseWeekKey, Recipe, resolveWeek, shiftWeek, weekKey } from "../data";
+import { CookedEntry, MEAL_SLOTS, MealSlot, parseWeekKey, Recipe, resolveWeek, shiftWeek, weekKey } from "../data";
 import { Avatar, IconKey, imgPen, missingCount, NavKey, SG_BOLD, SG_REG, Tag } from "../kitchen/kit";
+import { CookMealModal } from "../kitchen/CookMealModal";
 import { RecipeDetailModal } from "../kitchen/RecipeDetailModal";
 import { RecipeEditorModal } from "../kitchen/RecipeEditorModal";
 import { AISuggestions } from "../kitchen/AISuggestions";
@@ -16,13 +17,23 @@ const todayIdx = () => (new Date().getDay() + 6) % 7;
 type Placing = { recipeId?: string; day: number; slot: MealSlot } | null;
 
 export function KitchenPage() {
-  const { recipes, weeks, setMeal, people, stock, kitchen, shopMissing } = useApp();
+  const { recipes, weeks, setMeal, people, stock, kitchen, shopMissing, cooked, undoCooked, recordCooked } = useApp();
   const thisWeek = weekKey(new Date());
+  const [tab, setTab] = useState<"plan" | "diario">("plan");
   const [week, setWeek] = useState(thisWeek);
   const [day, setDay] = useState(todayIdx());
   const [detail, setDetail] = useState<Recipe | null>(null);
   const [editing, setEditing] = useState<{ open: boolean; recipe?: Recipe | null }>({ open: false });
   const [placing, setPlacing] = useState<Placing>(null);
+  const [cooking, setCooking] = useState<{ recipe: Recipe; week?: string; slotKey?: string } | null>(null);
+  const [selectedCooked, setSelectedCooked] = useState<CookedEntry | null>(null);
+  const [toast, setToast] = useState<{ id: string; recipeName: string } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const slots = MEAL_SLOTS.filter((s) => kitchen.breakfast || s.id !== "desayuno");
   const { plan, inherited } = resolveWeek(weeks, week);
@@ -110,37 +121,66 @@ export function KitchenPage() {
         })}
       </div>
 
-      {/* AI ideas */}
-      <AISuggestions week={week} onPick={(rid) => setPlacing({ recipeId: rid, day, slot: slots[slots.length > 2 ? 1 : 0].id })} />
+      <div className="flex gap-2">
+        <button type="button" onClick={() => setTab("plan")} className={`flex-1 rounded-full border-[1.5px] border-ink px-3 py-2 font-['Nunito:Bold'] ${tab === "plan" ? "bg-brand text-white" : "bg-white"}`}>
+          Planificación
+        </button>
+        <button type="button" onClick={() => setTab("diario")} className={`flex-1 rounded-full border-[1.5px] border-ink px-3 py-2 font-['Nunito:Bold'] ${tab === "diario" ? "bg-brand text-white" : "bg-white"}`}>
+          Diario de cocina
+        </button>
+      </div>
 
-      {/* Recetario */}
-      <section className="space-y-2.5">
-        <div className="flex items-end justify-between">
-          <div>
-            <h2 className={`${SG_BOLD} text-[22px] leading-7 text-ink`}>Recetario</h2>
-            <p className="font-['Nunito:Regular'] text-xs text-ink/50">{recipes.length} recetas de la casa</p>
-          </div>
-          <SketchButton onClick={() => setEditing({ open: true, recipe: null })}>+ Nueva</SketchButton>
-        </div>
-        {recipes.map((r) => {
-          const cook = people.find((p) => p.id === r.cookId);
-          const missing = missingCount(r, stock);
-          return (
-            <div key={r.id} className="bg-white rounded-[16px] p-3 flex items-center gap-2.5">
-              <div className="size-10 shrink-0 rounded-[12px] bg-app-bg flex items-center justify-center text-xl">{r.emoji}</div>
-              <div className="flex-1 min-w-0">
-                <p className="font-['Nunito:ExtraBold'] font-extrabold text-sm text-ink truncate">{r.name}</p>
-                <p className="font-['Nunito:Regular'] text-xs text-ink/40 truncate">
-                  {r.ingredients.length} ingredientes{missing ? ` · faltan ${missing}` : " · todo en casa"}{cook ? ` · ${cook.name}` : ""}
-                </p>
+      {tab === "plan" ? (
+        <>
+          {/* AI ideas */}
+          <AISuggestions week={week} onPick={(rid) => setPlacing({ recipeId: rid, day, slot: slots[slots.length > 2 ? 1 : 0].id })} />
+
+          {/* Recetario */}
+          <section className="space-y-2.5">
+            <div className="flex items-end justify-between">
+              <div>
+                <h2 className={`${SG_BOLD} text-[22px] leading-7 text-ink`}>Recetario</h2>
+                <p className="font-['Nunito:Regular'] text-xs text-ink/50">{recipes.length} recetas de la casa</p>
               </div>
-              <IconKey title="Ver" onClick={() => setDetail(r)}>📖</IconKey>
-              <IconKey title="Editar" onClick={() => setEditing({ open: true, recipe: r })}><img src={imgPen} alt="" className="size-4" /></IconKey>
-              <IconKey title="Planificar" onClick={() => setPlacing({ recipeId: r.id, day, slot: slots[0].id })} className="bg-amber-soft">📅</IconKey>
+              <SketchButton onClick={() => setEditing({ open: true, recipe: null })}>+ Nueva</SketchButton>
             </div>
-          );
-        })}
-      </section>
+            {recipes.map((r) => {
+              const cook = people.find((p) => p.id === r.cookId);
+              const missing = missingCount(r, stock);
+              return (
+                <div key={r.id} className="bg-white rounded-[16px] p-3 flex items-center gap-2.5">
+                  <div className="size-10 shrink-0 rounded-[12px] bg-app-bg flex items-center justify-center text-xl">{r.emoji}</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-['Nunito:ExtraBold'] font-extrabold text-sm text-ink truncate">{r.name}</p>
+                    <p className="font-['Nunito:Regular'] text-xs text-ink/40 truncate">
+                      {r.ingredients.length} ingredientes{missing ? ` · faltan ${missing}` : " · todo en casa"}{cook ? ` · ${cook.name}` : ""}
+                    </p>
+                  </div>
+                  <IconKey title="Ver" onClick={() => setDetail(r)}>📖</IconKey>
+                  <IconKey title="Editar" onClick={() => setEditing({ open: true, recipe: r })}><img src={imgPen} alt="" className="size-4" /></IconKey>
+                  <IconKey title="Planificar" onClick={() => setPlacing({ recipeId: r.id, day, slot: slots[0].id })} className="bg-amber-soft">📅</IconKey>
+                </div>
+              );
+            })}
+          </section>
+        </>
+      ) : (
+        <section className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            {[...cooked].filter((entry) => !entry.undone).slice(0, 12).map((entry) => (
+              <button key={entry.id} type="button" onClick={() => setSelectedCooked(entry)} className="overflow-hidden rounded-[18px] border-[1.5px] border-ink bg-white text-left">
+                <div className="relative h-28 w-full bg-app-bg">
+                  {entry.photoUrl ? <img src={entry.photoUrl} alt={entry.recipeName} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-4xl">🍽️</div>}
+                </div>
+                <div className="p-2">
+                  <p className="font-['Nunito:ExtraBold'] text-sm text-ink">{entry.recipeName}</p>
+                  <p className="font-['Nunito:Regular'] text-[11px] text-ink/60">{new Date(entry.at).toLocaleDateString("es", { day: "numeric", month: "short" })}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       <PlaceModal
         placing={placing}
@@ -151,8 +191,58 @@ export function KitchenPage() {
         onSave={(rid, d, slot, cookId) => { place(rid, d, slot, cookId); setDay(d); setPlacing(null); }}
         onClear={(d, slot) => { setMeal(week, `${d}:${slot}`, null); setPlacing(null); }}
       />
-      <RecipeDetailModal recipe={detail} onClose={() => setDetail(null)} onEdit={(r) => { setDetail(null); setEditing({ open: true, recipe: r }); }} />
+      <CookMealModal
+        open={!!cooking}
+        recipe={cooking?.recipe ?? null}
+        week={cooking?.week ?? week}
+        slotKey={cooking?.slotKey}
+        onClose={() => setCooking(null)}
+      />
+      <RecipeDetailModal
+        recipe={detail}
+        onClose={() => setDetail(null)}
+        onEdit={(r) => { setDetail(null); setEditing({ open: true, recipe: r }); }}
+        onCook={(r) => { setDetail(null); setCooking({ recipe: r, week, slotKey: `${day}:${slots[0]?.id ?? "almuerzo"}` }); }}
+      />
       <RecipeEditorModal open={editing.open} recipe={editing.recipe} onClose={() => setEditing({ open: false })} />
+      {selectedCooked && (
+        <Modal open={!!selectedCooked} onClose={() => setSelectedCooked(null)} title={selectedCooked.recipeName}>
+          <div className="space-y-3">
+            {selectedCooked.photoUrl && <img src={selectedCooked.photoUrl} alt={selectedCooked.recipeName} className="h-40 w-full rounded-[16px] object-cover border-[1.5px] border-ink" />}
+            <p className="font-['Nunito:Regular'] text-sm text-ink/70">{new Date(selectedCooked.at).toLocaleString("es", { dateStyle: "medium", timeStyle: "short" })}</p>
+            <ul className="space-y-1.5">
+              {selectedCooked.used.map((item) => (
+                <li key={`${selectedCooked.id}-${item.productId}`} className="rounded-[12px] border-[1.5px] border-ink bg-white p-2 text-sm text-ink">
+                  {item.name ?? item.productId} · {item.amount} {item.base}
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <SketchButton block color="coral" onClick={() => { undoCooked(selectedCooked.id); setSelectedCooked(null); }}>Deshacer</SketchButton>
+              <SketchButton block onClick={() => {
+                const recipe = recipes.find((r) => r.id === selectedCooked.recipeId);
+                if (recipe) {
+                  setSelectedCooked(null);
+                  setCooking({ recipe, week: selectedCooked.week ?? week, slotKey: selectedCooked.slotKey });
+                }
+              }}>Cocinar otra vez</SketchButton>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {toast && (
+        <div className="fixed bottom-4 left-1/2 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 rounded-[18px] border-[1.5px] border-ink bg-white p-3 shadow-[4px_4px_0px_rgba(0,0,0,0.25)]">
+          <p className="font-['Nunito:ExtraBold'] text-sm text-ink">✅ {toast.recipeName}</p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" onClick={() => { undoCooked(toast.id); setToast(null); }} className="flex-1 rounded-full border-[1.5px] border-ink bg-pastel-coral px-3 py-1.5 font-['Nunito:Bold'] text-sm">
+              Deshacer
+            </button>
+            <button type="button" onClick={() => setToast(null)} className="flex-1 rounded-full border-[1.5px] border-ink bg-white px-3 py-1.5 font-['Nunito:Bold'] text-sm">
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

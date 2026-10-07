@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import {
   CATEGORIES,
+  CookedEntry,
   Currency,
   DEFAULT_PEOPLE,
   FixedExpense,
@@ -42,6 +43,7 @@ type SharedState = {
   priceOverrides: Record<string, number>;
   notifications: SharedNotification[];
   recipes: Recipe[];
+  cooked: CookedEntry[];
   weeks: Record<string, WeekPlan>;
   kitchen: { breakfast: boolean };
   productMeasures: ProductMeasureOverrides;
@@ -89,8 +91,11 @@ type Ctx = {
   markAllRead: () => void;
 
   recipes: Recipe[];
+  cooked: CookedEntry[];
   saveRecipe: (r: Omit<Recipe, "id" | "createdAt"> & { id?: string }) => string;
   removeRecipe: (id: string) => void;
+  recordCooked: (entry: Omit<CookedEntry, "id" | "at"> & { id?: string }) => string;
+  undoCooked: (id: string) => void;
   weeks: Record<string, WeekPlan>;
   setMeal: (week: string, slotKey: string, meal: PlannedMeal | null) => void;
   kitchen: { breakfast: boolean };
@@ -130,6 +135,7 @@ const defaultShared = (): SharedState => ({
   fixed: defaultFixed(),
   priceOverrides: {},
   recipes: DEFAULT_RECIPES,
+  cooked: [],
   weeks: {},
   kitchen: { breakfast: false },
   productMeasures: {},
@@ -147,6 +153,7 @@ const normalizeShared = (state: Partial<SharedState>): SharedState => ({
   priceOverrides: state.priceOverrides ?? {},
   notifications: state.notifications ?? [],
   recipes: state.recipes ?? DEFAULT_RECIPES,
+  cooked: state.cooked ?? [],
   weeks: state.weeks ?? {},
   kitchen: state.kitchen ?? { breakfast: false },
   productMeasures: state.productMeasures ?? {},
@@ -326,39 +333,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setStock = (st: Record<string, StockItem>) => mutate((s) => ({ ...s, stock: st }));
   const setFixed = (f: FixedExpense[]) => mutate((s) => ({ ...s, fixed: f }));
 
+  const reconcileStockAndShopping = (base: SharedState, nextStock: Record<string, StockItem>, touched: Iterable<string>) => {
+    let shopping = base.shopping;
+    for (const productId of touched) {
+      const it = nextStock[productId];
+      if (!it) continue;
+      const ratio = it.current / Math.max(1, it.max);
+      const product = PRODUCTS.find((p) => p.id === productId);
+      if (ratio <= 0.25) {
+        const exists = shopping.some((i) => i.productId === productId && !i.bought);
+        if (!exists && product) {
+          const qty = it.current === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2);
+          shopping = [
+            { id: id(), productId, qtySuggested: qty, priority: it.current === 0 ? "alta" : "normal", createdAt: Date.now() },
+            ...shopping,
+          ];
+        } else if (exists && product) {
+          shopping = shopping.map((i) =>
+            i.productId === productId && !i.bought
+              ? {
+                  ...i,
+                  priority: it.current === 0 ? "alta" : "normal",
+                  qtySuggested: it.current === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2),
+                }
+              : i,
+          );
+        }
+      } else {
+        shopping = shopping.filter((i) => !(i.productId === productId && !i.bought));
+      }
+    }
+    return { ...base, stock: nextStock, shopping };
+  };
+
   const updateStock = (productId: string, current: number) => mutate((s) => {
     const it = s.stock[productId];
     if (!it) return s;
     const clamped = Math.max(0, Math.min(it.max, current));
     const stock = { ...s.stock, [productId]: { ...it, current: clamped } };
-    let shopping = s.shopping;
-    const ratio = clamped / Math.max(1, it.max);
-    const product = PRODUCTS.find((p) => p.id === productId);
-    if (ratio <= 0.25) {
-      const exists = shopping.some((i) => i.productId === productId && !i.bought);
-      if (!exists && product) {
-        const qty = clamped === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2);
-        shopping = [
-          { id: id(), productId, qtySuggested: qty, priority: clamped === 0 ? "alta" : "normal", createdAt: Date.now() },
-          ...shopping,
-        ];
-      } else if (exists) {
-        // refresh priority/qty if status changed (e.g. went from 1/4 to 0/4)
-        shopping = shopping.map((i) =>
-          i.productId === productId && !i.bought && product
-            ? {
-                ...i,
-                priority: clamped === 0 ? "alta" : "normal",
-                qtySuggested: clamped === 0 ? Math.ceil(product.monthlyQuantity) : Math.ceil(product.monthlyQuantity / 2),
-              }
-            : i,
-        );
-      }
-    } else {
-      // stock recovered above 25% — remove auto-added shopping entries that are still pending
-      shopping = shopping.filter((i) => !(i.productId === productId && !i.bought));
-    }
-    return { ...s, stock, shopping };
+    return reconcileStockAndShopping(s, stock, [productId]);
   });
 
   const addShopping: Ctx["addShopping"] = (item) => {
@@ -437,6 +450,74 @@ export function AppProvider({ children }: { children: ReactNode }) {
     recipes: s.recipes.filter((r) => r.id !== rid),
     weeks: Object.fromEntries(Object.entries(s.weeks).map(([k, w]) => [k, Object.fromEntries(Object.entries(w).filter(([, m]) => m.recipeId !== rid))])),
   }));
+
+  const recordCooked: Ctx["recordCooked"] = (entry) => {
+    const cookedId = entry.id ?? id();
+    mutate((s) => {
+      const nextStock = { ...s.stock };
+      const touched = new Set<string>();
+      const used = (entry.used ?? []).filter((item) => item.productId && item.amount > 0 && !item.noDiscount);
+      for (const item of used) {
+        const current = nextStock[item.productId]?.current ?? 0;
+        const nextCurrent = Math.max(0, current - item.packs);
+        nextStock[item.productId] = { ...nextStock[item.productId], productId: item.productId, current: nextCurrent, max: nextStock[item.productId]?.max ?? current };
+        touched.add(item.productId);
+      }
+
+      const now = Date.now();
+      const cookedEntry: CookedEntry = { ...entry, id: cookedId, at: now, used: entry.used ?? [] };
+      const nextWeeks = { ...s.weeks };
+      const weekKeyValue = entry.week ?? weekKey(new Date());
+      if (entry.slotKey) {
+        const plan = { ...resolveWeek(nextWeeks, weekKeyValue).plan };
+        plan[entry.slotKey] = { ...(plan[entry.slotKey] ?? { recipeId: entry.recipeId }), recipeId: entry.recipeId, cookId: entry.cookId, cookedId };
+        nextWeeks[weekKeyValue] = plan;
+      }
+
+      const personName = s.people.find((p) => p.id === cookedEntry.cookId)?.name ?? currentUserId;
+      return reconcileStockAndShopping(
+        { ...s, cooked: [cookedEntry, ...s.cooked], weeks: nextWeeks, notifications: [{ id: id(), title: "✅ Cocinado", body: `${personName} cocinó ${cookedEntry.recipeName}`, at: now, readBy: [] }, ...s.notifications].slice(0, 50) },
+        nextStock,
+        touched,
+      );
+    });
+    return cookedId;
+  };
+
+  const undoCooked = (cid: string) => mutate((s) => {
+    const target = s.cooked.find((entry) => entry.id === cid);
+    if (!target) return s;
+    const nextStock = { ...s.stock };
+    const touched = new Set<string>();
+    for (const item of target.used) {
+      if (!item.productId) continue;
+      const current = nextStock[item.productId]?.current ?? 0;
+      const nextCurrent = Math.max(0, current + item.packs);
+      nextStock[item.productId] = { ...nextStock[item.productId], productId: item.productId, current: nextCurrent, max: nextStock[item.productId]?.max ?? current };
+      touched.add(item.productId);
+    }
+
+    const nextWeeks = { ...s.weeks };
+    if (target.week && target.slotKey) {
+      const plan = { ...resolveWeek(nextWeeks, target.week).plan };
+      if (plan[target.slotKey]) {
+        const { cookedId, ...rest } = plan[target.slotKey];
+        plan[target.slotKey] = { ...rest, recipeId: rest.recipeId ?? target.recipeId };
+        nextWeeks[target.week] = plan;
+      }
+    }
+
+    return reconcileStockAndShopping(
+      {
+        ...s,
+        cooked: s.cooked.map((entry) => (entry.id === cid ? { ...entry, undone: true } : entry)),
+        weeks: nextWeeks,
+        notifications: [{ id: id(), title: "↩️ Deshecho", body: `${target.recipeName} quedó sin registrar en el inventario.`, at: Date.now(), readBy: [] }, ...s.notifications].slice(0, 50),
+      },
+      nextStock,
+      touched,
+    );
+  });
 
   const setMeal: Ctx["setMeal"] = (week, slotKey, meal) => mutate((s) => {
     const base = { ...resolveWeek(s.weeks, week).plan };
@@ -547,7 +628,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       priceOverrides: shared.priceOverrides, setProductPrice,
       productMeasures: shared.productMeasures, setProductMeasure,
       notifications: shared.notifications, unreadCount, pushNotification, markAllRead,
-      recipes: shared.recipes, saveRecipe, removeRecipe,
+      recipes: shared.recipes, cooked: shared.cooked, saveRecipe, removeRecipe, recordCooked, undoCooked,
       weeks: shared.weeks, setMeal, kitchen: shared.kitchen, setKitchen, shopMissing,
       syncStatus, lastSync, uploadAvatarFor,
     }),

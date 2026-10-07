@@ -300,7 +300,24 @@ export type Recipe = {
   createdAt: number;
 };
 
-export type PlannedMeal = { recipeId: string; cookId?: string };
+export type CookedUsedItem = { productId: string; amount: number; base: MeasureBase; packs: number; name?: string; noDiscount?: boolean };
+export type CookedEntry = {
+  id: string;
+  recipeId: string;
+  recipeName: string;
+  at: number;
+  week?: string;
+  slotKey?: string;
+  servings: number;
+  cookId?: string;
+  photoUrl?: string;
+  used: CookedUsedItem[];
+  rating?: Record<string, 1 | 2 | 3>;
+  note?: string;
+  undone?: boolean;
+};
+
+export type PlannedMeal = { recipeId: string; cookId?: string; cookedId?: string };
 /** key: `${dayIndex 0-6}:${slot}` */
 export type WeekPlan = Record<string, PlannedMeal>;
 
