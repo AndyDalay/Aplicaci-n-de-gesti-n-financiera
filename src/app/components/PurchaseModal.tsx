@@ -5,7 +5,7 @@ import { useApp } from "./AppContext";
 import { getCategory, getProductPrice, PRODUCTS, ShoppingItem } from "./data";
 
 export function PurchaseModal({ open, onClose, item }: { open: boolean; onClose: () => void; item: ShoppingItem | null }) {
-  const { currency, setCurrency, rate, addMovement, updateStock, stock, removeShopping, currentUserId, priceOverrides } = useApp();
+  const { currency, setCurrency, rate, addMovement, recordPurchase, stock, removeShopping, currentUserId, priceOverrides } = useApp();
   const product = item?.productId ? PRODUCTS.find((p) => p.id === item.productId) : undefined;
   const [qty, setQty] = useState(1);
   const [unitPrice, setUnitPrice] = useState(0);
@@ -38,7 +38,7 @@ export function PurchaseModal({ open, onClose, item }: { open: boolean; onClose:
     });
     if (item.productId) {
       const cur = stock[item.productId];
-      if (cur) updateStock(item.productId, Math.min(cur.max, cur.current + qty));
+      if (cur) recordPurchase(item.productId, qty);
     }
     removeShopping(item.id);
     onClose();

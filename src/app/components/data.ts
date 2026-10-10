@@ -217,13 +217,41 @@ export type StockItem = {
   productId: string;
   current: number;   // 0..max
   max: number;       // monthlyQuantity
+  expiresAt?: number;
+  openedAt?: number;
 };
+
+export function suggestedExpiryDays(productId: string): number | null {
+  const product = PRODUCTS.find((item) => item.id === productId);
+  if (!product) return null;
+  if (["carne-cerdo", "caja-pollo", "lomo", "san-jacobo"].includes(productId)) return 3;
+  if (product.category === "vegetales") return 5;
+  if (product.category === "lacteos" || ["yogurt", "leche-cond", "leche-polvo"].includes(productId)) return 7;
+  if (product.category === "viandas") return 10;
+  return null;
+}
+
+export function suggestedExpiryDate(productId: string, now = Date.now()): number | undefined {
+  const days = suggestedExpiryDays(productId);
+  if (days === null) return undefined;
+  const date = new Date(now);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + days);
+  return date.getTime();
+}
+
+export function expiringProductIds(stock: Record<string, StockItem>, withinDays = 4, now = Date.now()): string[] {
+  const end = now + withinDays * 24 * 60 * 60 * 1000;
+  return Object.values(stock).filter((item) => item.current > 0 && item.expiresAt !== undefined && item.expiresAt <= end).map((item) => item.productId);
+}
 
 export type ShoppingItem = {
   id: string;
   productId?: string;
   customName?: string;
   qtySuggested: number;
+  amountSuggested?: number;
+  unitSuggested?: string;
   priority: "alta" | "normal";
   assignedTo?: string;
   note?: string;
@@ -272,6 +300,43 @@ export const formatMoney = (cup: number, currency: Currency, rate: number) => {
   return `${new Intl.NumberFormat("es-ES").format(Math.round(cup))} CUP`;
 };
 
+export type RecipeCost = { total: number; perServing: number; unknownCount: number };
+
+export function costOfRecipe(
+  recipe: Pick<Recipe, "ingredients">,
+  servings = 1,
+  prices: Record<string, number> = {},
+  measures: ProductMeasureOverrides = {},
+): RecipeCost {
+  let total = 0;
+  let unknownCount = 0;
+  for (const ingredient of recipe.ingredients) {
+    const normalizeName = (name: string) => name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+    const product = PRODUCTS.find((item) => item.id === ingredient.productId)
+      ?? PRODUCTS.find((item) => normalizeName(item.name) === normalizeName(ingredient.name));
+    if (!product) {
+      unknownCount += 1;
+      continue;
+    }
+    const measure = resolveProductMeasure(product, measures);
+    const price = getProductPrice(product.id, prices);
+    const explicitPack = ingredient.amount === undefined && /\b(paquete|paquetes|pack|lata|latas|cart[oó]n|cartones)\b/i.test(ingredient.qty);
+    const parsed = parseQty(ingredient.qty);
+    if (explicitPack && parsed && Number.isFinite(price) && price > 0) {
+      total += parsed.amount * price;
+      continue;
+    }
+    const converted = toBase(ingredient, measure);
+    if (!converted || !Number.isFinite(price) || price <= 0 || !Number.isFinite(measure.pack) || measure.pack <= 0) {
+      unknownCount += 1;
+      continue;
+    }
+    total += (converted.amount / measure.pack) * price;
+  }
+  const safeServings = Number.isFinite(servings) && servings > 0 ? servings : 1;
+  return { total, perServing: total / safeServings, unknownCount };
+}
+
 // ── Cocina ─────────────────────────────────────────────
 export type MealSlot = "desayuno" | "almuerzo" | "comida";
 export const MEAL_SLOTS: { id: MealSlot; label: string; emoji: string }[] = [
@@ -288,8 +353,10 @@ export type PhotoMeta = { source: "stock" | "ai" | "user"; credit?: string; link
 export type Recipe = {
   id: string;
   name: string;
+  shortName?: string;
   emoji: string;
   minutes?: number;
+  servings?: number;
   description?: string;
   scale?: RecipeScale;
   ingredients: RecipeIngredient[];
@@ -317,7 +384,115 @@ export type CookedEntry = {
   undone?: boolean;
 };
 
-export type PlannedMeal = { recipeId: string; cookId?: string; cookedId?: string };
+export type PlannedMeal = { recipeId: string; cookId?: string; cookedId?: string; sideIds?: string[]; servings?: number };
+export type ShoppingReviewNeed = {
+  key: string;
+  productId?: string;
+  customName?: string;
+  category: string;
+  amountNeeded: number;
+  unit: string;
+  packsSuggested: number;
+  pendingPacks: number;
+  costCUP?: number;
+  dishes: string[];
+  approximate: boolean;
+  unknown: boolean;
+};
+
+export function calculateShoppingReview(
+  weeks: Record<string, WeekPlan>,
+  weekKeys: string[],
+  recipes: Recipe[],
+  cooked: CookedEntry[],
+  stock: Record<string, StockItem>,
+  measures: ProductMeasureOverrides = {},
+  prices: Record<string, number> = {},
+  pendingShopping: ShoppingItem[] = [],
+): ShoppingReviewNeed[] {
+  const recipeById = new Map(recipes.map((recipe) => [recipe.id, recipe]));
+  const cookedSlots = new Set(cooked.filter((entry) => !entry.undone && entry.week && entry.slotKey).map((entry) => `${entry.week}:${entry.slotKey}`));
+  const grouped = new Map<string, { productId?: string; customName?: string; category: string; amount: number; unit: string; dishes: Set<string>; approximate: boolean; unknown: boolean }>();
+  for (const week of weekKeys) {
+    const { plan } = resolveWeek(weeks, week);
+    for (const [slotKey, meal] of Object.entries(plan)) {
+      if (meal.cookedId || cookedSlots.has(`${week}:${slotKey}`)) continue;
+      const mealRecipes = [meal.recipeId, ...(meal.sideIds ?? [])].map((id) => recipeById.get(id)).filter((recipe): recipe is Recipe => Boolean(recipe));
+      for (const recipe of mealRecipes) {
+        const sourceServings = recipe.servings ?? 1;
+        const scale = meal.servings && sourceServings > 0 ? meal.servings / sourceServings : 1;
+        const dishName = recipe.shortName ?? recipe.name;
+        for (const ingredient of recipe.ingredients) {
+          const product = ingredient.productId ? PRODUCTS.find((item) => item.id === ingredient.productId) : undefined;
+          const converted = product ? toBase({ ...ingredient, amount: ingredient.amount === undefined ? undefined : ingredient.amount * scale }, resolveProductMeasure(product, measures)) : null;
+          if (product && converted) {
+            const measure = resolveProductMeasure(product, measures);
+            const key = `product:${product.id}`;
+            const current = grouped.get(key) ?? { productId: product.id, category: product.category, amount: 0, unit: measure.base, dishes: new Set<string>(), approximate: !measure.measureConfirmed, unknown: false };
+            current.amount += converted.amount * (ingredient.amount === undefined ? scale : 1);
+            current.dishes.add(dishName);
+            current.approximate ||= !measure.measureConfirmed;
+            grouped.set(key, current);
+            continue;
+          }
+
+          const parsed = ingredient.amount !== undefined && ingredient.unit
+            ? { amount: ingredient.amount * scale, unit: ingredient.unit }
+            : parseQty(ingredient.qty);
+          const customName = ingredient.name.trim() || "Ingrediente sin nombre";
+          const unit = parsed?.unit ?? "sin conversión";
+          const amount = parsed ? parsed.amount * (ingredient.amount !== undefined ? 1 : scale) : 0;
+          const key = `custom:${customName.toLocaleLowerCase("es")}:${unit}`;
+          const current = grouped.get(key) ?? { customName, category: "otros", amount: 0, unit, dishes: new Set<string>(), approximate: true, unknown: true };
+          current.amount += amount;
+          current.dishes.add(dishName);
+          grouped.set(key, current);
+        }
+      }
+    }
+  }
+
+  const pendingByKey = new Map<string, number>();
+  const pendingCustomByName = new Map<string, number>();
+  for (const item of pendingShopping.filter((entry) => !entry.bought)) {
+    const key = item.productId ? `product:${item.productId}` : `custom:${(item.customName ?? "").toLocaleLowerCase("es")}:${item.unitSuggested ?? "sin conversión"}`;
+    pendingByKey.set(key, (pendingByKey.get(key) ?? 0) + item.qtySuggested);
+    if (!item.productId && !item.unitSuggested) {
+      const nameKey = (item.customName ?? "").trim().toLocaleLowerCase("es");
+      pendingCustomByName.set(nameKey, (pendingCustomByName.get(nameKey) ?? 0) + item.qtySuggested);
+    }
+  }
+
+  return [...grouped.entries()].map(([key, item]) => {
+    const product = item.productId ? PRODUCTS.find((entry) => entry.id === item.productId) : undefined;
+    if (!product) {
+      const pendingPacks = pendingByKey.get(key) ?? pendingCustomByName.get((item.customName ?? "").trim().toLocaleLowerCase("es")) ?? 0;
+      return { key, customName: item.customName, category: item.category, amountNeeded: item.amount, unit: item.unit, packsSuggested: item.amount || 1, pendingPacks, dishes: [...item.dishes], approximate: item.approximate, unknown: true };
+    }
+    const measure = resolveProductMeasure(product, measures);
+    const stockAmount = (stock[product.id]?.current ?? 0) * measure.pack;
+    const remaining = Math.max(0, item.amount - stockAmount);
+    const halfPackAllowed = measure.measureConfirmed && measure.base !== "u";
+    const increment = halfPackAllowed ? 0.5 : 1;
+    const rawPacks = remaining / measure.pack;
+    const packsSuggested = Math.ceil(rawPacks / increment) * increment;
+    const unitPrice = getProductPrice(product.id, prices);
+    const unknown = item.unknown || !Number.isFinite(unitPrice) || unitPrice <= 0 || !Number.isFinite(measure.pack) || measure.pack <= 0;
+    return {
+      key,
+      productId: product.id,
+      category: item.category,
+      amountNeeded: item.amount,
+      unit: measure.base,
+      packsSuggested,
+      pendingPacks: pendingByKey.get(key) ?? 0,
+      ...(unknown ? {} : { costCUP: packsSuggested * unitPrice }),
+      dishes: [...item.dishes],
+      approximate: item.approximate || !measure.measureConfirmed,
+      unknown,
+    };
+  }).filter((need) => need.packsSuggested > 0 || need.pendingPacks > 0);
+}
 /** key: `${dayIndex 0-6}:${slot}` */
 export type WeekPlan = Record<string, PlannedMeal>;
 
@@ -337,7 +512,34 @@ export const resolveWeek = (weeks: Record<string, WeekPlan>, k: string): { plan:
   return { plan: prev ? weeks[prev] : {}, inherited: true };
 };
 
+export function movePlannedMeal(weeks: Record<string, WeekPlan>, week: string, fromKey: string, toKey: string): Record<string, WeekPlan> {
+  if (fromKey === toKey) return weeks;
+  const plan = { ...resolveWeek(weeks, week).plan };
+  const source = plan[fromKey];
+  if (!source) return weeks;
+  const destination = plan[toKey];
+  plan[toKey] = source;
+  if (destination) plan[fromKey] = destination;
+  else delete plan[fromKey];
+  return { ...weeks, [week]: plan };
+}
+
 const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
+export function displayName(recipe: Pick<Recipe, "name" | "shortName">): string {
+  const preferred = recipe.shortName?.trim();
+  if (preferred) return preferred.split(/\s+/).slice(0, 8).join(" ");
+  const words = recipe.name.trim().split(/\s+/).filter(Boolean);
+  const seen = new Set<string>();
+  const concise = words.filter((word) => {
+    const normalized = norm(word.replace(/[.,;:!?]+$/g, ""));
+    if (["a", "la", "el", "de", "del", "con", "y"].includes(normalized)) {
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+    }
+    return true;
+  });
+  return concise.slice(0, 8).join(" ");
+}
 /** Best-effort match of a free-text ingredient to a catalogue product. */
 export const matchProduct = (name: string): Product | undefined => {
   const n = norm(name);
@@ -348,12 +550,12 @@ export const matchProduct = (name: string): Product | undefined => {
 
 export const DEFAULT_RECIPES: Recipe[] = [
   {
-    id: "congri-cerdo", name: "Congrí con cerdo frito", emoji: "🍛", minutes: 60, scale: "rapido", createdAt: 0,
+    id: "congri-cerdo", name: "Congrí con cerdo frito", emoji: "🍛", minutes: 60, servings: 2, scale: "rapido", createdAt: 0,
     ingredients: [{ productId: "carne-cerdo", name: "Carne de Cerdo", qty: "500 g" }, { name: "Frijoles negros", qty: "1 taza" }, { name: "Arroz", qty: "2 tazas" }],
     steps: ["Ablanda los frijoles y guarda el caldo.", "Sofríe ajo, cebolla y ají.", "Añade arroz, frijoles y caldo; cocina tapado.", "Fríe el cerdo en trozos con sal y comino."],
   },
   {
-    id: "picadillo-arroz", name: "Picadillo a la criolla", emoji: "🥘", minutes: 30, scale: "rapido", createdAt: 0,
+    id: "picadillo-arroz", name: "Picadillo a la criolla", emoji: "🥘", minutes: 30, servings: 2, scale: "rapido", createdAt: 0,
     ingredients: [{ productId: "picadillo", name: "Picadillo", qty: "1 paquete" }, { name: "Arroz", qty: "2 tazas" }, { name: "Puré de tomate", qty: "1/2 lata" }],
     steps: ["Sofríe ajo, cebolla y ají.", "Añade el picadillo y dora.", "Agrega tomate, comino y un chorro de vino seco.", "Sirve con arroz blanco."],
   },

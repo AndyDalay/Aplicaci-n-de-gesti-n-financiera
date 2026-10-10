@@ -73,12 +73,16 @@ function EquivalencesSection() {
 }
 
 export function SettingsPage() {
-  const { people, setPeople, currentUserId, setCurrentUserId, rate, setRate, defaultCurrency, setDefaultCurrency, viewMode, setViewMode, uploadAvatarFor, kitchen, setKitchen } = useApp();
+  const { people, setPeople, currentUserId, setCurrentUserId, rate, setRate, defaultCurrency, setDefaultCurrency, viewMode, setViewMode, uploadAvatarFor, kitchen, setKitchen, foodBudgetCUP, setFoodBudgetCUP, readyMealReferenceCUP, setReadyMealReferenceCUP } = useApp();
   const fileRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [tempRate, setTempRate] = useState(rate);
+  const [tempFoodBudget, setTempFoodBudget] = useState(foodBudgetCUP);
+  const [tempReadyMealReference, setTempReadyMealReference] = useState(readyMealReferenceCUP);
   const [uploading, setUploading] = useState<string | null>(null);
 
   useEffect(() => { setTempRate(rate); }, [rate]);
+  useEffect(() => { setTempFoodBudget(foodBudgetCUP); }, [foodBudgetCUP]);
+  useEffect(() => { setTempReadyMealReference(readyMealReferenceCUP); }, [readyMealReferenceCUP]);
 
   const onAvatar = async (pid: string, f: File | null) => {
     if (!f) return;
@@ -158,6 +162,16 @@ export function SettingsPage() {
 
       <SketchCard color="bg-pastel-mint" className="p-3">
         <h3 className="leading-none mb-2">Cocina</h3>
+        <div className="mb-3">
+          <label htmlFor="food-budget" className="font-bold">Presupuesto semanal de comida (CUP)</label>
+          <div className="mt-1 flex gap-2"><Input id="food-budget" type="number" min="0" step="100" inputMode="decimal" value={tempFoodBudget || ""} placeholder="0 · sin presupuesto" onChange={(event) => setTempFoodBudget(Number(event.target.value) || 0)} /><SketchButton color="mint" onClick={() => setFoodBudgetCUP(tempFoodBudget)}>Guardar</SketchButton></div>
+          <p className="mt-1 text-xs text-muted-foreground">0 = sin límite semanal configurado.</p>
+        </div>
+        <div className="mb-3">
+          <label htmlFor="ready-meal-reference" className="font-bold">Precio de referencia de comida hecha (CUP, opcional)</label>
+          <div className="mt-1 flex gap-2"><Input id="ready-meal-reference" type="number" min="0" step="50" inputMode="decimal" value={tempReadyMealReference || ""} placeholder="0 · sin comparación" onChange={(event) => setTempReadyMealReference(Number(event.target.value) || 0)} /><SketchButton color="mint" onClick={() => setReadyMealReferenceCUP(tempReadyMealReference)}>Guardar</SketchButton></div>
+          <p className="mt-1 text-xs text-muted-foreground">Se usa para comparar el costo estimado por ración.</p>
+        </div>
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="font-bold">Planificar desayuno</p>

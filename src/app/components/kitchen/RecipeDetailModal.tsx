@@ -1,7 +1,7 @@
 import { Modal } from "../Modal";
 import { useApp } from "../AppContext";
 import { SketchButton } from "../ui-kit";
-import { Recipe } from "../data";
+import { costOfRecipe, formatMoney, Recipe } from "../data";
 import { RecipePhoto } from "./RecipePhoto";
 import { Avatar, ingredientStatus, productEmoji, SG_BOLD, Tag, SCALE_META } from "./kit";
 
@@ -12,10 +12,11 @@ const STATUS = {
 } as const;
 
 export function RecipeDetailModal({ recipe, onClose, onEdit, onCook }: { recipe: Recipe | null; onClose: () => void; onEdit: (r: Recipe) => void; onCook?: (r: Recipe) => void }) {
-  const { stock, people, shopMissing, pushNotification, saveRecipe } = useApp();
+  const { stock, people, shopMissing, pushNotification, saveRecipe, currency, rate, priceOverrides, productMeasures, readyMealReferenceCUP } = useApp();
   const r = recipe;
   const cook = people.find((p) => p.id === r?.cookId);
   const toBuy = r ? r.ingredients.filter((i) => ingredientStatus(i.productId, stock) === "buy").length : 0;
+  const cost = r ? costOfRecipe(r, r.servings ?? 1, priceOverrides, productMeasures) : null;
 
   return (
     <Modal open={!!r} onClose={onClose} title={r ? `${r.emoji} ${r.name}` : ""}>
@@ -29,7 +30,9 @@ export function RecipeDetailModal({ recipe, onClose, onEdit, onCook }: { recipe:
             {r.minutes ? <Tag className="bg-white">⏱ {r.minutes} min</Tag> : null}
             {r.scale && <Tag className={SCALE_META[r.scale].bg}>{SCALE_META[r.scale].emoji} {SCALE_META[r.scale].label}</Tag>}
             {cook && <Tag className="bg-white"><Avatar person={cook} size={14} /> Cocina {cook.name}</Tag>}
+            {cost && <Tag className="bg-pastel-yellow">{cost.unknownCount ? "≈ " : ""}{formatMoney(cost.total, currency, rate)} · {formatMoney(cost.perServing, currency, rate)} por ración{cost.unknownCount ? ` · ${cost.unknownCount} sin precio` : ""}</Tag>}
           </div>
+          {cost && readyMealReferenceCUP > 0 && cost.unknownCount === 0 && <p className="rounded-xl bg-pastel-mint/60 px-3 py-2 font-['Nunito:Regular'] text-xs text-ink">Cocinar en casa: {formatMoney(cost.perServing, currency, rate)} por ración · Comprar hecho: {formatMoney(readyMealReferenceCUP, currency, rate)} · Diferencia: {formatMoney(readyMealReferenceCUP - cost.perServing, currency, rate)}</p>}
           {r.description && <p className="font-['Nunito:Regular'] text-sm text-ink/70">{r.description}</p>}
 
           <section>

@@ -17,8 +17,9 @@ import {
   PlannedMeal,
   Recipe,
   resolveWeek,
-  weekKey,
+  movePlannedMeal,
   WeekPlan,
+  suggestedExpiryDate,
 } from "./data";
 import { fetchState, fetchVersion, pushState, uploadAvatar } from "./sync";
 
@@ -47,6 +48,8 @@ type SharedState = {
   weeks: Record<string, WeekPlan>;
   kitchen: { breakfast: boolean };
   productMeasures: ProductMeasureOverrides;
+  foodBudgetCUP: number;
+  readyMealReferenceCUP: number;
 };
 
 type Ctx = {
@@ -66,11 +69,14 @@ type Ctx = {
   stock: Record<string, StockItem>;
   setStock: (s: Record<string, StockItem>) => void;
   updateStock: (productId: string, current: number) => void;
+  setStockDates: (productId: string, dates: { expiresAt?: number; openedAt?: number }) => void;
+  recordPurchase: (productId: string, packs: number) => void;
 
   shopping: ShoppingItem[];
   addShopping: (item: Omit<ShoppingItem, "id" | "createdAt">) => void;
   removeShopping: (id: string) => void;
   updateShopping: (id: string, patch: Partial<ShoppingItem>) => void;
+  addWeeklyShopping: (items: Array<Pick<ShoppingItem, "productId" | "customName" | "qtySuggested" | "amountSuggested" | "unitSuggested" | "priority" | "note">>) => number;
 
   movements: Movement[];
   addMovement: (m: Omit<Movement, "id" | "at">) => void;
@@ -93,6 +99,7 @@ type Ctx = {
   recipes: Recipe[];
   cooked: CookedEntry[];
   saveRecipe: (r: Omit<Recipe, "id" | "createdAt"> & { id?: string }) => string;
+  updateRecipeShortNames: (names: { id: string; shortName: string }[]) => void;
   removeRecipe: (id: string) => void;
   recordCooked: (entry: Omit<CookedEntry, "id" | "at"> & { id?: string }) => string;
   undoCooked: (id: string) => void;
@@ -100,11 +107,16 @@ type Ctx = {
   setMeal: (week: string, slotKey: string, meal: PlannedMeal | null) => void;
   kitchen: { breakfast: boolean };
   setKitchen: (k: { breakfast: boolean }) => void;
+  foodBudgetCUP: number;
+  setFoodBudgetCUP: (amountCUP: number) => void;
+  readyMealReferenceCUP: number;
+  setReadyMealReferenceCUP: (amountCUP: number) => void;
   /** Adds every missing ingredient of a recipe to the shopping list; returns how many were added. */
   shopMissing: (recipeId: string) => number;
   syncStatus: "loading" | "online" | "offline";
   lastSync: number;
   uploadAvatarFor: (personId: string, file: File) => Promise<void>;
+  movePlanned: (week: string, fromKey: string, toKey: string) => void;
 };
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -139,6 +151,8 @@ const defaultShared = (): SharedState => ({
   weeks: {},
   kitchen: { breakfast: false },
   productMeasures: {},
+  foodBudgetCUP: 0,
+  readyMealReferenceCUP: 0,
   notifications: [{ id: id(), title: "🏡 Casita lista", body: "Andy y Rachel ya pueden colaborar.", at: Date.now(), readBy: [] }],
 });
 
@@ -157,6 +171,8 @@ const normalizeShared = (state: Partial<SharedState>): SharedState => ({
   weeks: state.weeks ?? {},
   kitchen: state.kitchen ?? { breakfast: false },
   productMeasures: state.productMeasures ?? {},
+  foodBudgetCUP: state.foodBudgetCUP ?? 0,
+  readyMealReferenceCUP: state.readyMealReferenceCUP ?? 0,
 });
 
 function fireOSNotification(title: string, body: string) {
@@ -370,7 +386,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const it = s.stock[productId];
     if (!it) return s;
     const clamped = Math.max(0, Math.min(it.max, current));
-    const stock = { ...s.stock, [productId]: { ...it, current: clamped } };
+    const stock = { ...s.stock, [productId]: { ...it, current: clamped, ...(clamped < it.current && !it.openedAt ? { openedAt: Date.now() } : {}) } };
+    return reconcileStockAndShopping(s, stock, [productId]);
+  });
+
+  const setStockDates = (productId: string, dates: { expiresAt?: number; openedAt?: number }) => mutate((s) => {
+    const item = s.stock[productId];
+    if (!item) return s;
+    return { ...s, stock: { ...s.stock, [productId]: { ...item, ...dates } } };
+  });
+
+  const recordPurchase = (productId: string, packs: number) => mutate((s) => {
+    const item = s.stock[productId];
+    if (!item || !Number.isFinite(packs) || packs <= 0) return s;
+    const suggested = suggestedExpiryDate(productId);
+    const expiresAt = item.expiresAt !== undefined && suggested !== undefined ? Math.min(item.expiresAt, suggested) : item.expiresAt ?? suggested;
+    const stock = { ...s.stock, [productId]: { ...item, current: Math.min(item.max, item.current + packs), expiresAt } };
     return reconcileStockAndShopping(s, stock, [productId]);
   });
 
@@ -392,6 +423,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const removeShopping = (sid: string) => mutate((s) => ({ ...s, shopping: s.shopping.filter((i) => i.id !== sid) }));
   const updateShopping = (sid: string, patch: Partial<ShoppingItem>) =>
     mutate((s) => ({ ...s, shopping: s.shopping.map((i) => (i.id === sid ? { ...i, ...patch } : i)) }));
+
+  const addWeeklyShopping: Ctx["addWeeklyShopping"] = (items) => {
+    let changedCount = 0;
+    mutate((s) => {
+      changedCount = 0;
+      let shopping = [...s.shopping];
+      for (const item of items) {
+        const matches = shopping.filter((candidate) => {
+          if (candidate.bought) return false;
+          if (item.productId) return candidate.productId === item.productId;
+          const sameCustomName = !candidate.productId && (candidate.customName ?? "").trim().toLocaleLowerCase("es") === (item.customName ?? "").trim().toLocaleLowerCase("es");
+          return sameCustomName && (!candidate.unitSuggested || candidate.unitSuggested === item.unitSuggested);
+        });
+        const existingTotal = matches.reduce((sum, candidate) => sum + candidate.qtySuggested, 0);
+        const desired = Math.max(item.qtySuggested, existingTotal);
+        if (!matches.length || matches.length > 1 || matches[0].qtySuggested < desired) changedCount += 1;
+        if (matches.length) {
+          const first = matches[0];
+          shopping = shopping.filter((candidate) => candidate.id === first.id || !matches.some((match) => match.id === candidate.id));
+          shopping = shopping.map((candidate) => candidate.id === first.id ? {
+            ...candidate,
+            ...item,
+            qtySuggested: desired,
+            note: [candidate.note, item.note].filter(Boolean).join(" · ") || undefined,
+          } : candidate);
+        } else {
+          shopping = [{ ...item, id: id(), createdAt: Date.now() }, ...shopping];
+        }
+      }
+      return changedCount ? { ...s, shopping } : s;
+    });
+    return changedCount;
+  };
 
   const addMovement: Ctx["addMovement"] = (m) => mutate((s) => ({
     ...s,
@@ -427,6 +491,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
       notifications: [{ id: id(), title: n.title, body: n.body, at: Date.now(), readBy: [] }, ...s.notifications].slice(0, 50),
     }));
 
+  useEffect(() => {
+    if (syncStatus !== "online") return;
+    const now = new Date();
+    const tomorrowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+    const tomorrowEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2).getTime();
+    const key = `casita:expiry-notified:${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    let stored: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+      if (Array.isArray(parsed)) stored = parsed.filter((value): value is string => typeof value === "string");
+    } catch {
+      stored = [];
+    }
+    const notified = new Set<string>(stored);
+    for (const item of Object.values(shared.stock)) {
+      if (item.expiresAt === undefined || item.expiresAt < tomorrowStart || item.expiresAt >= tomorrowEnd || notified.has(item.productId)) continue;
+      const product = PRODUCTS.find((entry) => entry.id === item.productId);
+      if (!product) continue;
+      pushNotification({ title: `⏳ ${product.name} vence mañana`, body: "Abre Cocina y usa lo que vence pronto en Ideas del chef." });
+      notified.add(item.productId);
+    }
+    localStorage.setItem(key, JSON.stringify([...notified]));
+  }, [syncStatus, shared.stock]);
+
   const markAllRead = () =>
     mutate((s) => ({
       ...s,
@@ -444,6 +532,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return { ...s, recipes: exists ? s.recipes.map((x) => (x.id === rid ? rec : x)) : [rec, ...s.recipes] };
     });
     return rid;
+  };
+  const updateRecipeShortNames: Ctx["updateRecipeShortNames"] = (names) => {
+    const byRecipeId = new Map(names.map((entry) => [entry.id, entry.shortName.trim().split(/\s+/).slice(0, 8).join(" ")]));
+    mutate((s) => ({
+      ...s,
+      recipes: s.recipes.map((recipe) => byRecipeId.has(recipe.id) ? { ...recipe, shortName: byRecipeId.get(recipe.id) } : recipe),
+    }));
   };
   const removeRecipe = (rid: string) => mutate((s) => ({
     ...s,
@@ -524,14 +619,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (meal) base[slotKey] = meal; else delete base[slotKey];
     return { ...s, weeks: { ...s.weeks, [week]: base } };
   });
+  const movePlanned: Ctx["movePlanned"] = (week, fromKey, toKey) => mutate((s) => {
+    const weeks = movePlannedMeal(s.weeks, week, fromKey, toKey);
+    return weeks === s.weeks ? s : { ...s, weeks };
+  });
   const setKitchen = (k: { breakfast: boolean }) => mutate((s) => ({ ...s, kitchen: k }));
+  const setFoodBudgetCUP = (amountCUP: number) => mutate((s) => ({ ...s, foodBudgetCUP: Number.isFinite(amountCUP) ? Math.max(0, amountCUP) : 0 }));
+  const setReadyMealReferenceCUP = (amountCUP: number) => mutate((s) => ({ ...s, readyMealReferenceCUP: Number.isFinite(amountCUP) ? Math.max(0, amountCUP) : 0 }));
 
   const missingOf = (s: SharedState, r: Recipe) => r.ingredients.filter((i) => !i.productId || (s.stock[i.productId]?.current ?? 0) <= 0);
   const shopMissing = (rid: string) => {
-    const r = shared.recipes.find((x) => x.id === rid);
+    const current = sharedRef.current;
+    const r = current.recipes.find((x) => x.id === rid);
     if (!r) return 0;
-    const pending = new Set(shared.shopping.filter((i) => !i.bought).map((i) => i.productId ?? i.customName?.toLowerCase()));
-    const toAdd = missingOf(shared, r).filter((i) => !pending.has(i.productId ?? i.name.toLowerCase()));
+    const pending = new Set(current.shopping.filter((i) => !i.bought).map((i) => i.productId ?? i.customName?.toLowerCase()));
+    const toAdd = missingOf(current, r).filter((i) => !pending.has(i.productId ?? i.name.toLowerCase()));
     if (!toAdd.length) return 0;
     mutate((s) => ({
       ...s,
@@ -621,15 +723,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       defaultCurrency: shared.defaultCurrency, setDefaultCurrency,
       rate: shared.rate, setRate,
       viewMode, setViewMode,
-      stock: shared.stock, setStock, updateStock,
-      shopping: shared.shopping, addShopping, removeShopping, updateShopping,
+      stock: shared.stock, setStock, updateStock, setStockDates, recordPurchase,
+      shopping: shared.shopping, addShopping, removeShopping, updateShopping, addWeeklyShopping,
       movements: shared.movements, addMovement, removeMovement, updateMovement,
       fixed: shared.fixed, setFixed,
       priceOverrides: shared.priceOverrides, setProductPrice,
       productMeasures: shared.productMeasures, setProductMeasure,
       notifications: shared.notifications, unreadCount, pushNotification, markAllRead,
-      recipes: shared.recipes, cooked: shared.cooked, saveRecipe, removeRecipe, recordCooked, undoCooked,
-      weeks: shared.weeks, setMeal, kitchen: shared.kitchen, setKitchen, shopMissing,
+      recipes: shared.recipes, cooked: shared.cooked, saveRecipe, updateRecipeShortNames, removeRecipe, recordCooked, undoCooked,
+      weeks: shared.weeks, setMeal, movePlanned, kitchen: shared.kitchen, setKitchen, foodBudgetCUP: shared.foodBudgetCUP, setFoodBudgetCUP, readyMealReferenceCUP: shared.readyMealReferenceCUP, setReadyMealReferenceCUP, shopMissing,
       syncStatus, lastSync, uploadAvatarFor,
     }),
     [shared, currentUserId, currency, viewMode, syncStatus, lastSync],

@@ -21,7 +21,7 @@ function MobileApp() {
   const [tab, setTab] = useState<Tab>("compras");
   const meta = TITLES[tab];
   return (
-    <div className="min-h-dvh w-full bg-app-bg flex flex-col">
+    <div className="min-h-dvh w-full overflow-x-clip bg-app-bg flex flex-col">
       <Header pageTitle={meta.title} pageSubtitle={meta.sub} pageIndex={tab === "config" ? NAV_ITEMS.length : NAV_ITEMS.findIndex((i) => i.id === tab)} onAvatar={() => setTab("config")} />
       <main className="flex-1 w-full max-w-2xl mx-auto">
         {tab === "compras" && <ShoppingListPage />}

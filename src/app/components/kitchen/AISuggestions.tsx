@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { X } from "lucide-react";
 import { useApp } from "../AppContext";
 import { SketchButton } from "../ui-kit";
-import { matchProduct, PhotoMeta, PRODUCTS, resolveWeek } from "../data";
+import { costOfRecipe, expiringProductIds, formatMoney, matchProduct, PhotoMeta, PRODUCTS, resolveWeek } from "../data";
 import { AISuggestion, fetchRecipeSuggestions } from "../sync";
 import { ingredientStatus, SCALE_META, SG_BOLD, Tag } from "./kit";
 import { SuggestionDetailModal } from "./SuggestionDetailModal";
 import { IngredientPicker } from "./IngredientPicker";
+import { CravingField } from "./CravingField";
 
 const CRAVING_DRAFT_KEY = "casita:chef-craving-draft";
 const QUICK_CRAVINGS = ["Con picadillo", "Pasta", "Algo ligero", "Con huevo", "Sin freír", "Para compartir"];
@@ -15,7 +16,7 @@ type ActiveOrder = { craving: string; ingredientIds: string[]; onlyInventory: bo
 
 /** Chef-IA cards: three suggestions (rápido · saludable · elegante) built from the household context. */
 export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeId: string) => void }) {
-  const { people, stock, recipes, weeks, kitchen, saveRecipe } = useApp();
+  const { people, stock, recipes, weeks, kitchen, saveRecipe, currency, rate, priceOverrides, productMeasures, readyMealReferenceCUP } = useApp();
   const [items, setItems] = useState<AISuggestion[]>([]);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [err, setErr] = useState("");
@@ -23,6 +24,7 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
   const [craving, setCraving] = useState(() => localStorage.getItem(CRAVING_DRAFT_KEY) ?? "");
   const [ingredientIds, setIngredientIds] = useState<string[]>([]);
   const [onlyInventory, setOnlyInventory] = useState(true);
+  const [cheapestFirst, setCheapestFirst] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [activeOrder, setActiveOrder] = useState<ActiveOrder | null>(null);
   const cravingRef = useRef<HTMLTextAreaElement>(null);
@@ -52,8 +54,8 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
         onlyInventory: order?.onlyInventory ?? false,
         productCatalog: PRODUCTS.map(({ id, name }) => ({ id, name })),
       });
-      const order = ["rapido", "saludable", "elegante"];
-      setItems(res.slice(0, 3).sort((a, b) => order.indexOf(a.scale) - order.indexOf(b.scale)));
+      const scaleOrder = ["rapido", "saludable", "elegante"];
+      setItems(res.slice(0, 3).sort((a, b) => scaleOrder.indexOf(a.scale) - scaleOrder.indexOf(b.scale)));
       setState("idle");
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e) || "No hubo respuesta. Comprueba tu conexión e inténtalo de nuevo.");
@@ -74,10 +76,16 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
     cravingRef.current?.focus();
   };
 
+  const useExpiringSoon = () => {
+    const expiring = expiringProductIds(stock, 7);
+    setIngredientIds((current) => [...new Set([...current, ...expiring])]);
+    setCraving((current) => current.includes("Usar lo que vence pronto") ? current : `${current.trim()}${current.trim() ? ", " : ""}Usar lo que vence pronto`.slice(0, 200));
+  };
+
   const adopt = (s: AISuggestion, imageUrl?: string, imageMeta?: PhotoMeta) => {
     setOpen(null);
     const rid = saveRecipe({
-      name: s.name, emoji: s.emoji || "🍲", minutes: s.minutes, description: s.description,
+      name: s.name, shortName: s.shortName, emoji: s.emoji || "🍲", minutes: s.minutes, servings: s.servings, description: s.description,
       scale: SCALE_META[s.scale] ? s.scale : undefined,
       ingredients: s.ingredients.map((i) => ({
         name: i.name,
@@ -93,6 +101,17 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
     });
     onPick(rid);
   };
+
+  const orderedItems = useMemo(() => {
+    if (!cheapestFirst) return items;
+    return [...items].sort((left, right) => {
+      const leftCost = costOfRecipe(left, left.servings ?? 1, priceOverrides, productMeasures);
+      const rightCost = costOfRecipe(right, right.servings ?? 1, priceOverrides, productMeasures);
+      if (leftCost.unknownCount && !rightCost.unknownCount) return 1;
+      if (rightCost.unknownCount && !leftCost.unknownCount) return -1;
+      return leftCost.total - rightCost.total;
+    });
+  }, [cheapestFirst, items, priceOverrides, productMeasures]);
 
   return (
     <section className="space-y-3">
@@ -138,10 +157,14 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
         </div>
       )}
 
+      <div className="flex justify-end">
+        <button type="button" aria-pressed={cheapestFirst} onClick={() => setCheapestFirst((value) => !value)} className={`min-h-9 rounded-full border px-3 font-['Nunito:Bold'] text-xs ${cheapestFirst ? "border-ink bg-pastel-yellow" : "border-ink/20 bg-white"}`}>Más baratas primero</button>
+      </div>
       <AnimatePresence>
-        {state !== "loading" && items.map((s, k) => {
+        {state !== "loading" && orderedItems.map((s, k) => {
           const meta = SCALE_META[s.scale] ?? SCALE_META.rapido;
           const toBuy = s.ingredients.filter((i) => ingredientStatus(matchProduct(i.name)?.id, stock) === "buy").length;
+          const cost = costOfRecipe(s, s.servings ?? 1, priceOverrides, productMeasures);
           return (
             <motion.article
               key={s.name + k}
@@ -170,6 +193,8 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
                     return <Tag key={j} className={st === "buy" ? "bg-pastel-coral/70" : "bg-app-bg"}>{st === "buy" ? "🛒" : "✓"} {i.name}</Tag>;
                   })}
                 </div>
+                <p className="font-['Nunito:Bold'] text-xs text-ink">{cost.unknownCount ? "≈ " : ""}{formatMoney(cost.total, currency, rate)} · {formatMoney(cost.perServing, currency, rate)} por ración{cost.unknownCount ? ` · ${cost.unknownCount} sin precio` : ""}</p>
+                {readyMealReferenceCUP > 0 && cost.unknownCount === 0 && <p className="font-['Nunito:Regular'] text-[11px] text-ink/60">En casa {formatMoney(cost.perServing, currency, rate)} · hecho {formatMoney(readyMealReferenceCUP, currency, rate)} por ración</p>}
                 {s.missingNote && <p className="rounded-lg bg-pastel-coral/40 px-2 py-1 font-['Nunito:Regular'] text-xs text-ink">{s.missingNote}</p>}
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-['Nunito:Regular'] text-xs text-ink/50">{toBuy ? `Faltan ${toBuy}` : "Todo en casa"} · {s.steps.length} pasos · <span className="underline">ver receta</span></span>
@@ -183,27 +208,19 @@ export function AISuggestions({ week, onPick }: { week: string; onPick: (recipeI
 
       <div className="space-y-3 rounded-[18px] border border-ink/15 bg-white/70 p-3">
         <div className="relative">
-          <textarea
-            ref={cravingRef}
-            rows={2}
-            maxLength={200}
+          <CravingField
+            inputRef={cravingRef}
             value={craving}
-            onChange={(event) => {
-              setCraving(event.target.value.slice(0, 200));
-              event.currentTarget.style.height = "auto";
-              event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 88)}px`;
-            }}
-            onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); submitCraving(); } }}
+            onChange={setCraving}
             placeholder="¿Qué se te antoja? Ej: algo con picadillo, una pasta, sin freír…"
-            aria-label="Describe tu antojo"
-            className="min-h-[52px] max-h-[88px] w-full resize-none overflow-y-auto rounded-xl border border-ink/20 bg-white py-3 pl-3 pr-12 font-['Nunito:Regular'] text-sm leading-[22px] text-ink outline-none focus:border-ink"
+            ariaLabel="Describe tu antojo"
+            onSubmit={submitCraving}
           />
-          {craving && <button type="button" aria-label="Borrar antojo" onClick={() => { setCraving(""); if (cravingRef.current) cravingRef.current.style.height = "52px"; }} className="absolute right-2 top-2 grid size-9 place-items-center rounded-full text-ink/60 hover:bg-app-bg"><X size={16} /></button>}
-          <span className="pointer-events-none absolute bottom-2 right-3 font-['Nunito:Regular'] text-[10px] text-ink/45">{craving.length}/200</span>
         </div>
 
         <div className="flex flex-wrap gap-2">
           {QUICK_CRAVINGS.map((quick) => <button type="button" key={quick} onClick={() => addQuickCraving(quick)} className="min-h-10 rounded-full border border-ink/15 bg-white px-3 font-['Nunito:Bold'] text-xs text-ink active:bg-pastel-yellow">{quick}</button>)}
+          {expiringProductIds(stock, 7).length > 0 && <button type="button" onClick={useExpiringSoon} className="min-h-10 rounded-full border border-ink/20 bg-pastel-yellow px-3 font-['Nunito:Bold'] text-xs text-ink">♻️ Usar lo que vence pronto</button>}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

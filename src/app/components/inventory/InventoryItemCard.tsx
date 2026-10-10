@@ -15,6 +15,9 @@ type Props = {
   max: number;
   product: Product;
   measureConfirmed: boolean;
+  expiresAt?: number;
+  openedAt?: number;
+  onDates: (dates: { expiresAt?: number; openedAt?: number }) => void;
   inList: boolean;
   onStock: (v: number) => void;
   onEditPrice: () => void;
@@ -34,7 +37,7 @@ function StepKey({ children, onClick, label }: { children: ReactNode; onClick: (
   );
 }
 
-export function InventoryItemCard({ emoji, tint, name, qty, price, current, max, product, measureConfirmed, inList, onStock, onEditPrice, onToggleList }: Props) {
+export function InventoryItemCard({ emoji, tint, name, qty, price, current, max, product, measureConfirmed, expiresAt, openedAt, onDates, inList, onStock, onEditPrice, onToggleList }: Props) {
   const [adjustMode, setAdjustMode] = useState<"use" | "buy" | null>(null);
   const [amount, setAmount] = useState("");
   const [unit, setUnit] = useState("g");
@@ -42,6 +45,8 @@ export function InventoryItemCard({ emoji, tint, name, qty, price, current, max,
   const stepLabel = measureConfirmed ? (product.base === "u" ? "1 u" : `100 ${product.base}`) : "0,25 pack";
   const currentAmount = current * product.pack;
   const percentage = max > 0 ? (current / max) * 100 : 0;
+  const dateInputValue = (value?: number) => value === undefined ? "" : (() => { const date = new Date(value); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; })();
+  const expiryDays = expiresAt === undefined ? null : Math.ceil((new Date(new Date(expiresAt).getFullYear(), new Date(expiresAt).getMonth(), new Date(expiresAt).getDate()).getTime() - new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime()) / 86_400_000);
   const units = product.base === "g"
     ? ["g", "kg", "lb", ...(product.density ? ["taza", "cda", "cdta"] : [])]
     : product.base === "ml" ? ["ml", "l", "taza", "cda", "cdta"] : ["u"];
@@ -83,6 +88,16 @@ export function InventoryItemCard({ emoji, tint, name, qty, price, current, max,
       </div>
 
       <StockMeter current={current} max={max} onChange={onStock} amountLabel={`${measureConfirmed ? "" : "≈ "}${formatAmount(currentAmount, product.base)}`} percentage={percentage} />
+
+      <div className="flex flex-wrap items-center gap-2">
+        {expiryDays !== null && <span className={`rounded-full px-2 py-1 font-['Nunito:Bold'] text-[10px] ${expiryDays < 0 ? "bg-ink/10 text-ink/60" : expiryDays <= 1 ? "bg-pastel-coral" : expiryDays <= 4 ? "bg-pastel-yellow" : "bg-app-bg"}`}>{expiryDays < 0 ? "Vencido" : expiryDays === 0 ? "Vence hoy" : `Vence en ${expiryDays} d`}</span>}
+        <label className="flex min-h-9 items-center gap-1 rounded-lg bg-app-bg px-2 text-[10px] font-bold text-ink/70">Vence
+          <input type="date" aria-label={`Vencimiento de ${name}`} value={dateInputValue(expiresAt)} onChange={(event) => { const value = event.target.value; onDates({ expiresAt: value ? new Date(`${value}T00:00:00`).getTime() : undefined, openedAt }); }} className="min-w-0 bg-transparent text-[10px]" />
+        </label>
+        <label className="flex min-h-9 items-center gap-1 rounded-lg bg-app-bg px-2 text-[10px] font-bold text-ink/70">Abierto
+          <input type="date" aria-label={`Fecha de apertura de ${name}`} value={dateInputValue(openedAt)} onChange={(event) => { const value = event.target.value; onDates({ expiresAt, openedAt: value ? new Date(`${value}T00:00:00`).getTime() : undefined }); }} className="min-w-0 bg-transparent text-[10px]" />
+        </label>
+      </div>
 
       <div className="flex items-start justify-between pt-3">
         <div className="flex gap-2.5 items-center">

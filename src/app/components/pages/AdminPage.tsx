@@ -2,6 +2,7 @@ import { ReactNode, useMemo, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { useApp } from "../AppContext";
 import { formatMoney, getCategory, getProductPrice, Movement, PRODUCTS } from "../data";
+import { shortenRecipeNames } from "../sync";
 import { CategoryIcon, SketchButton } from "../ui-kit";
 import { AddExpenseModal } from "../AddExpenseModal";
 import { EditMovementModal } from "../EditMovementModal";
@@ -22,11 +23,26 @@ function monthBounds(offset: number) {
 }
 
 export function AdminPage() {
-  const { people, fixed, setFixed, movements, removeMovement, currency, rate, priceOverrides } = useApp();
+  const { people, fixed, setFixed, movements, removeMovement, currency, rate, priceOverrides, recipes, updateRecipeShortNames } = useApp();
   const [addOpen, setAddOpen] = useState(false);
   const [prefill, setPrefill] = useState<any>(undefined);
   const [editing, setEditing] = useState<Movement | null>(null);
   const [monthOffset, setMonthOffset] = useState(0);
+  const [shortening, setShortening] = useState(false);
+  const [shortenError, setShortenError] = useState("");
+
+  const shortenNames = async () => {
+    setShortening(true);
+    setShortenError("");
+    try {
+      const result = await shortenRecipeNames(recipes.map(({ id, name }) => ({ id, name })));
+      updateRecipeShortNames(result);
+    } catch (error) {
+      setShortenError(error instanceof Error ? error.message : "No se pudieron acortar los nombres.");
+    } finally {
+      setShortening(false);
+    }
+  };
 
   const { start, end, date } = monthBounds(monthOffset);
   const isFuture = monthOffset > 0;
@@ -151,6 +167,13 @@ export function AdminPage() {
           </div>
         </section>
       )}
+
+      <section className="flex items-center gap-2 px-4">
+        <SketchButton color="yellow" disabled={shortening || recipes.length === 0} onClick={() => void shortenNames()}>
+          {shortening ? "Acortando nombres…" : "✨ Acortar nombres con IA"}
+        </SketchButton>
+        {shortenError && <p role="alert" className="min-w-0 text-xs text-brand">{shortenError}</p>}
+      </section>
 
       {/* Fixed expenses */}
       <section className="flex flex-col gap-3 px-4 w-full">

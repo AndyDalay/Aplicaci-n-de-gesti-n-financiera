@@ -134,6 +134,13 @@ export type RecipeSuggestionContext = {
   productCatalog?: { id: string; name: string }[];
 };
 
+export type RecipeReplacementContext = Omit<RecipeSuggestionContext, "craving"> & {
+  day: string;
+  current: { name: string; ingredients: string[] };
+  instruction: string;
+  scale: AISuggestion["scale"];
+};
+
 async function requestSuggestions(url: string, ctx: RecipeSuggestionContext): Promise<AISuggestion[]> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 90_000);
@@ -175,6 +182,44 @@ export async function fetchRecipeSuggestions(ctx: RecipeSuggestionContext): Prom
       throw new Error(`No se pudieron generar ideas. Chef: ${String(chefError)}. Respaldo: ${String(legacyError)}`);
     }
   }
+}
+
+export async function fetchRecipeReplacements(ctx: RecipeReplacementContext): Promise<AISuggestion[]> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 90_000);
+  try {
+    const response = await fetch(`${CHEF}/chef/replace`, {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(ctx),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !Array.isArray(data.suggestions)) throw new Error(data.error ?? `HTTP ${response.status}`);
+    return data.suggestions.map((suggestion: AISuggestion) => ({
+      ...suggestion,
+      ingredients: Array.isArray(suggestion.ingredients) ? suggestion.ingredients.map((ingredient) => ({
+        ...ingredient,
+        qty: ingredient.qty ?? (ingredient.amount !== undefined && ingredient.unit ? `${ingredient.amount} ${ingredient.unit}` : ""),
+      })) : [],
+      steps: (Array.isArray(suggestion.steps) ? suggestion.steps : [String(suggestion.steps ?? "")]).map((step) => String(step).trim()).filter(Boolean),
+    }));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function shortenRecipeNames(recipes: { id: string; name: string }[]): Promise<{ id: string; shortName: string }[]> {
+  const response = await fetchWithTimeout(`${CHEF}/shorten`, {
+    method: "POST",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify(recipes),
+  }, async (res) => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !Array.isArray(data)) throw new Error(data.error ?? `HTTP ${res.status}`);
+    return data as { id: string; shortName: string }[];
+  });
+  return response;
 }
 
 // ---------- Recipe photos ----------

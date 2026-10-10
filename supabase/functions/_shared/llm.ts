@@ -42,6 +42,8 @@ export type ChefInput = {
   mustUse?: string[];
   onlyInventory?: boolean;
   productCatalog?: { id: string; name: string }[];
+  replaceCurrent?: { name: string; ingredients: string[] };
+  replaceVariation?: string;
 };
 type ChefUnit = "g" | "ml" | "u" | "taza" | "cda" | "cdta";
 export type ChefRecipe = {
@@ -141,6 +143,8 @@ function promptFor(input: ChefInput, scale: RecipeScale): string {
     `Inventario disponible: ${input.inventory || "casi vacío"}.`,
     input.missing ? `Agotado: ${input.missing}.` : "",
     input.planned ? `Ya planificado esta semana: ${input.planned}. No repitas esos platos.` : "",
+    input.replaceCurrent ? `Sustituye únicamente esta comida: ${input.replaceCurrent.name} (ingredientes actuales: ${input.replaceCurrent.ingredients.join(", ")}). No devuelvas el mismo plato ni una variación nominal del actual.` : "",
+    input.replaceVariation ? `Enfoque distinto de esta alternativa: ${input.replaceVariation}.` : "",
     input.slot ? `Comida a cubrir: ${input.slot}.` : "",
     `Antojo (prioridad absoluta): ${input.craving?.trim() || "sin preferencia escrita"}. Las tres escalas deben respetarlo.`,
     `Ingredientes obligatorios para esta receta: ${required}. Incluye todos literalmente en ingredients.`,
@@ -151,7 +155,7 @@ function promptFor(input: ChefInput, scale: RecipeScale): string {
   ].filter(Boolean).join("\n");
 }
 
-async function complete(model: string, url: string, key: string, prompt: string, json: boolean): Promise<string> {
+async function complete(model: string, url: string, key: string, prompt: string, json: boolean, system = SYSTEM): Promise<string> {
   const response = await fetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -162,7 +166,7 @@ async function complete(model: string, url: string, key: string, prompt: string,
       max_tokens: /gpt-oss|qwen3|deepseek/i.test(model) ? 4500 : 2400,
       ...(json ? { response_format: { type: "json_object" } } : {}),
       ...(/gpt-oss/.test(model) ? { reasoning_effort: "medium" } : {}),
-      messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
+      messages: [{ role: "system", content: system }, { role: "user", content: prompt }],
     }),
   });
   if (!response.ok) throw new Error(`${model} HTTP ${response.status}: ${(await response.text()).slice(0, 180)}`);
@@ -172,8 +176,9 @@ async function complete(model: string, url: string, key: string, prompt: string,
   return typeof content === "string" ? content : JSON.stringify(content);
 }
 
-async function recipeFor(input: ChefInput, scale: RecipeScale): Promise<ChefRecipe> {
-  const prompt = promptFor(input, scale);
+async function recipeFor(input: ChefInput, scale: RecipeScale, variation?: string): Promise<ChefRecipe> {
+  const request = variation ? { ...input, replaceVariation: variation } : input;
+  const prompt = promptFor(request, scale);
   const errors: string[] = [];
   for (const provider of PROVIDERS) {
     const key = Deno.env.get(provider.env);
@@ -184,6 +189,9 @@ async function recipeFor(input: ChefInput, scale: RecipeScale): Promise<ChefReci
     for (const model of provider.models) {
       try {
         const recipe = parseRecipe(await complete(model, provider.url, key, prompt, provider.json), scale, input.mustUse ?? [], input.productCatalog ?? []);
+        if (input.replaceCurrent && normalize(recipe.name) === normalize(input.replaceCurrent.name)) {
+          throw new Error("La IA repitió el plato que se quería sustituir.");
+        }
         console.log(`chef recipe ${scale} via ${model}`);
         return recipe;
       } catch (error) {
@@ -204,4 +212,71 @@ export async function suggestChefRecipes(input: ChefInput): Promise<ChefRecipe[]
     throw new Error(`No se pudieron preparar las tres ideas. ${failures.join(" || ")}`);
   }
   return suggestions;
+}
+
+export type ChefReplacementInput = Omit<ChefInput, "craving" | "replaceCurrent" | "replaceVariation"> & {
+  day: string;
+  current: { name: string; ingredients: string[] };
+  instruction: string;
+  scale: RecipeScale;
+};
+
+export async function suggestChefReplacements(input: ChefReplacementInput): Promise<ChefRecipe[]> {
+  const recipeInput: ChefInput = {
+    couple: input.couple,
+    inventory: input.inventory,
+    missing: input.missing,
+    planned: input.planned,
+    slot: input.day ? `${input.day} · ${input.slot ?? "comida"}` : input.slot,
+    craving: input.instruction,
+    mustUse: input.mustUse,
+    onlyInventory: input.onlyInventory,
+    productCatalog: input.productCatalog,
+    replaceCurrent: input.current,
+  };
+  const variations = [
+    "conserva una técnica casera sencilla y destaca el ingrediente obligatorio",
+    "usa una combinación de sabores distinta y una cocción ligera",
+    "propón una presentación atractiva con ingredientes y preparación diferentes",
+  ];
+  const results = await Promise.allSettled(variations.map((variation) => recipeFor(recipeInput, input.scale, variation)));
+  const suggestions = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  if (suggestions.length !== variations.length) {
+    const failures = results.flatMap((result) => result.status === "rejected" ? [String(result.reason)] : []);
+    throw new Error(`No se pudieron preparar las tres alternativas. ${failures.join(" || ")}`);
+  }
+  const uniqueNames = new Set(suggestions.map((suggestion) => normalize(suggestion.name)));
+  if (uniqueNames.size !== variations.length) throw new Error("La IA repitió una alternativa. Vuelve a buscar para obtener tres platos distintos.");
+  return suggestions;
+}
+
+export async function shortenRecipeNames(recipes: { id: string; name: string }[]): Promise<{ id: string; shortName: string }[]> {
+  if (!recipes.length) return [];
+  const system = "Eres editor de nombres de recetas en español. Acorta cada nombre para una tarjeta pequeña sin perder el plato principal ni su identidad. Devuelve solo JSON válido.";
+  const prompt = `Para cada receta, crea un shortName natural en español de máximo 8 palabras. Conserva exactamente su id. No inventes ni omitas recetas. Responde {\"recipes\":[{\"id\":\"...\",\"shortName\":\"...\"}]}. Recetas: ${JSON.stringify(recipes)}`;
+  const errors: string[] = [];
+  for (const provider of PROVIDERS) {
+    const key = Deno.env.get(provider.env);
+    if (!key) continue;
+    for (const model of provider.models) {
+      try {
+        const parsed = extractObject(await complete(model, provider.url, key, prompt, provider.json, system));
+        const rawNames = Array.isArray(parsed.recipes) ? parsed.recipes : [];
+        const requested = new Map(recipes.map((recipe) => [recipe.id, recipe]));
+        const result = rawNames.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const value = item as Record<string, unknown>;
+          const id = typeof value.id === "string" ? value.id : "";
+          const original = requested.get(id);
+          const words = typeof value.shortName === "string" ? value.shortName.trim().split(/\s+/).filter(Boolean).slice(0, 8) : [];
+          return original && words.length ? [{ id, shortName: words.join(" ") }] : [];
+        });
+        if (result.length !== recipes.length) throw new Error("La IA no devolvió todos los nombres solicitados.");
+        return result;
+      } catch (error) {
+        errors.push(`${model}: ${String(error)}`);
+      }
+    }
+  }
+  throw new Error(errors.slice(-4).join(" | ") || "No hay proveedores de IA configurados.");
 }

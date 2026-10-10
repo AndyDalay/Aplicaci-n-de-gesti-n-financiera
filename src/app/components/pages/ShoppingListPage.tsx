@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useApp } from "../AppContext";
-import { getProductPrice, PRODUCTS, formatMoney, ShoppingItem } from "../data";
+import { formatAmount, getProductPrice, PRODUCTS, formatMoney, ShoppingItem } from "../data";
 import { SketchCard, SketchButton, Pill } from "../ui-kit";
 import { BudgetCard } from "../shopping/BudgetCard";
 import { ShoppingItemCard } from "../shopping/ShoppingItemCard";
@@ -69,6 +69,12 @@ export function ShoppingListPage() {
             const stockItem = item.productId ? stock[item.productId] : undefined;
             const noHay = stockItem ? stockItem.current === 0 : item.priority === "alta";
             const assigned = item.assignedTo ? people.find((p) => p.id === item.assignedTo) : undefined;
+            const actualAmount = item.amountSuggested !== undefined && item.unitSuggested
+              ? ` · ${product && (item.unitSuggested === "g" || item.unitSuggested === "ml" || item.unitSuggested === "u") ? formatAmount(item.amountSuggested, item.unitSuggested) : `${item.amountSuggested} ${item.unitSuggested}`}`
+              : product?.unit ? ` ${product.unit}` : "";
+            const quantityLabel = !product && item.amountSuggested !== undefined
+              ? `${item.amountSuggested} ${item.unitSuggested ?? "unidades"}`
+              : `${item.qtySuggested} ${item.qtySuggested === 1 ? "paquete" : "paquetes"}${actualAmount}`;
 
             return (
               <motion.div
@@ -80,7 +86,7 @@ export function ShoppingListPage() {
                 <ShoppingItemCard
                   emoji={product?.emoji ?? "📝"}
                   name={product?.name ?? item.customName ?? ""}
-                  qty={`x${item.qtySuggested}${product?.unit ? ` ${product.unit}` : ""}`}
+                  qty={quantityLabel}
                   price={product ? `≈ ${formatMoney(getProductPrice(product.id, priceOverrides) * item.qtySuggested, currency, rate)}` : undefined}
                   badge={noHay ? "none" : item.priority === "alta" ? "low" : undefined}
                   assigned={assigned}

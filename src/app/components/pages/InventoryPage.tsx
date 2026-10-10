@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useApp } from "../AppContext";
-import { CATEGORIES, formatAmount, getCategory, getProductPrice, PRODUCTS, Product, formatMoney, resolveProductMeasure } from "../data";
+import { CATEGORIES, expiringProductIds, formatAmount, getCategory, getProductPrice, PRODUCTS, Product, formatMoney, resolveProductMeasure } from "../data";
 import { CategoryIcon, Input } from "../ui-kit";
 import { getStockStatus } from "../StockMeter";
 import { InventoryItemCard } from "../inventory/InventoryItemCard";
@@ -9,10 +9,12 @@ import { motion } from "motion/react";
 import { EditPriceModal } from "../EditPriceModal";
 
 export function InventoryPage() {
-  const { stock, updateStock, currency, rate, addShopping, removeShopping, shopping, priceOverrides, productMeasures } = useApp();
+  const { stock, updateStock, setStockDates, currency, rate, addShopping, removeShopping, shopping, priceOverrides, productMeasures } = useApp();
   const [filter, setFilter] = useState<string>("");
   const [q, setQ] = useState("");
   const [editingPrice, setEditingPrice] = useState<Product | null>(null);
+  const [expiringOnly, setExpiringOnly] = useState(false);
+  const expiringIds = useMemo(() => new Set(expiringProductIds(stock, 4)), [stock]);
 
   const statusBucket = (current: number, max: number): 0 | 1 | 2 => {
     if (current === 0) return 2;            // empty → bottom
@@ -67,9 +69,12 @@ export function InventoryPage() {
             <CategoryIcon cat={c} /> {c.name}
           </button>
         ))}
+          <button type="button" aria-pressed={expiringOnly} onClick={() => setExpiringOnly((value) => !value)} className={chip(expiringOnly)}>⏳ Por vencer</button>
       </div>
 
       {Object.entries(groups).map(([catId, items]) => {
+        const visibleItems = items.filter((product) => !expiringOnly || expiringIds.has(product.id));
+        if (!visibleItems.length) return null;
         const cat = getCategory(catId);
         return (
           <section key={catId} className="space-y-3">
@@ -78,7 +83,7 @@ export function InventoryPage() {
               <span className={`${cat.color} rounded-full px-2 text-xs font-['Nunito:Bold'] font-bold leading-5`}>{items.length}</span>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
-              {items.map((p) => {
+              {visibleItems.map((p) => {
                 const s = stock[p.id];
                 const measure = resolveProductMeasure(p, productMeasures);
                 const status = getStockStatus(s.current, s.max);
@@ -95,6 +100,9 @@ export function InventoryPage() {
                       max={s.max}
                       product={measure}
                       measureConfirmed={measure.measureConfirmed}
+                      expiresAt={s.expiresAt}
+                      openedAt={s.openedAt}
+                      onDates={(dates) => setStockDates(p.id, dates)}
                       inList={!!listItem}
                       onStock={(v) => updateStock(p.id, v)}
                       onEditPrice={() => setEditingPrice(p)}
